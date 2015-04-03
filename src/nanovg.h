@@ -32,6 +32,11 @@ extern "C" {
 
 typedef struct NVGcontext NVGcontext;
 
+// Perform vertex transformation in shader. Allows applying transformations to display lists.
+#define NVG_TRANSFORM_IN_VERTEX_SHADER 1
+
+typedef struct NVGdisplayList NVGdisplayList;
+
 struct NVGcolor {
 	union {
 		float rgba[4];
@@ -123,6 +128,27 @@ void nvgCancelFrame(NVGcontext* ctx);
 
 // Ends drawing flushing remaining render state.
 void nvgEndFrame(NVGcontext* ctx);
+
+// Create a new display list for caching geometry in NanoVG front end. The display list will cache
+// tesselated/baked paths and text layouts. The cache grows dynamically; with initalNumCommands
+// parameter you can specifiy the inital size (use -1 for default size).
+// Returns handle to display list object.
+NVGdisplayList* nvgCreateDisplayList(int initalNumCommands);
+    
+// Deletes a generated display list and frees all memory.
+void nvgDeleteDisplayList(NVGdisplayList* list);
+    
+// Bind the display list; all NanoVG draw commands after this call will be cached. Including scissor and
+// paint. To unbind the display list set list parameter to NULL.
+void nvgBindDisplayList(NVGcontext* ctx, NVGdisplayList* list);
+    
+// Clears the cache but does not free or reallocate any memory. The size of cache keeps the same, even if
+// cache grew during previous use.
+void nvgResetDisplayList(NVGdisplayList* list);
+    
+// Draws the cached geometry by passing it to the back end. The current transform and global alpha is
+// applied to the display list.
+void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list);
 
 //
 // Color utils
@@ -598,9 +624,12 @@ struct NVGparams {
 	void (*renderViewport)(void* uptr, int width, int height);
 	void (*renderCancel)(void* uptr);
 	void (*renderFlush)(void* uptr);
-	void (*renderFill)(void* uptr, NVGpaint* paint, NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths);
-	void (*renderStroke)(void* uptr, NVGpaint* paint, NVGscissor* scissor, float fringe, float strokeWidth, const NVGpath* paths, int npaths);
-	void (*renderTriangles)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const NVGvertex* verts, int nverts);
+	void (*renderFill)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                       float fringe, const float* bounds, const NVGpath* paths, int npaths);
+	void (*renderStroke)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                         float fringe, float strokeWidth, const NVGpath* paths, int npaths);
+	void (*renderTriangles)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                            const NVGvertex* verts, int nverts);
 	void (*renderDelete)(void* uptr);
 };
 typedef struct NVGparams NVGparams;

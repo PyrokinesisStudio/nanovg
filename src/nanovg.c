@@ -45,6 +45,9 @@
 
 #define NVG_COUNTOF(arr) (sizeof(arr) / sizeof(0[arr]))
 
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER
+static const float NVGidentityXform[] = { 1, 0, 0, 1, 0, 0, };
+#endif
 
 enum NVGcommands {
 	NVG_MOVETO = 0,
@@ -104,6 +107,70 @@ struct NVGpathCache {
 };
 typedef struct NVGpathCache NVGpathCache;
 
+
+#define NVG_INIT_DISPLAYLIST_COMMANDS_SIZE 64
+#define NVG_INIT_DISPLAYLIST_VERTS_PER_PATH_SIZE 32
+
+//Experimental: tesselate shaped directly into the drawlist buffer (avoids additional copy, but obfuscates program flow)
+#define NVG_FILL_DISPLAYLIST_BUFFER_DIRECT 1
+
+enum NVGdisplayListCommandType
+{
+	NVG_COMMAND_FILL = 0, 
+	NVG_COMMAND_STROKE = 1,
+	NVG_COMMAND_TRIANGLE = 2
+};
+
+struct NVGdisplayListCommand
+{
+	enum NVGdisplayListCommandType type;
+
+	NVGpaint paint;
+	NVGscissor scissor;
+	float xform[6];
+
+	union
+	{
+		struct {
+			float fringe;
+			float bounds[4];
+			int path;
+			int npaths;
+		}
+		fillParams;
+
+		struct {
+			float fringe;
+			float strokeWidth;
+			int path;
+			int npaths;
+		}
+		strokeParams;
+
+		struct {
+			int vertices;
+			int nverts;
+		}
+		triangleParams;
+	};
+};
+typedef struct NVGdisplayListCommand NVGdisplayListCommand;
+
+struct NVGdisplayList
+{
+	NVGdisplayListCommand* commands;
+	int ccommands;
+	int ncommands;
+    
+    NVGvertex* vertices;
+    int nverts;
+    int cverts;
+    
+    NVGpath* paths;
+    int npaths;
+    int cpaths;
+};
+
 struct NVGcontext {
 	NVGparams params;
 	float* commands;
@@ -126,7 +193,35 @@ struct NVGcontext {
 	int strokeTriCount;
 	int textTriCount;
 #endif
+
+	// callbacks to render back-end
+
+	void (*renderFill)		(NVGcontext* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                             float fringe, const float* bounds, const NVGpath* paths, int npaths);
+	void (*renderStroke)	(NVGcontext* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                             float fringe, float strokeWidth, const NVGpath* paths, int npaths);
+	void (*renderTriangles)	(NVGcontext* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                             const NVGvertex* verts, int nverts);
+
+	NVGdisplayList* displayList;
 };
+
+//default immediate render callbacks
+static void nvg__renderFill(NVGcontext* ctx, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                            float fringe, const float* bounds, const NVGpath* paths, int npaths)
+{
+	ctx->params.renderFill(ctx->params.userPtr, paint, scissor, xform, fringe, bounds, paths, npaths);
+}
+static void nvg__renderStroke(NVGcontext* ctx, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                              float fringe, float strokeWidth, const NVGpath* paths, int npaths)
+{
+	ctx->params.renderStroke(ctx->params.userPtr, paint, scissor, xform, fringe, strokeWidth, paths, npaths);
+}
+static void nvg__renderTriangles(NVGcontext* ctx, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                                 const NVGvertex* verts, int nverts)
+{
+	ctx->params.renderTriangles(ctx->params.userPtr, paint, scissor, xform, verts, nverts);
+}
 
 static float nvg__sqrtf(float a) { return sqrtf(a); }
 static float nvg__modf(float a, float b) { return fmodf(a, b); }
@@ -202,6 +297,11 @@ static void nvg__setDevicePixelRatio(NVGcontext* ctx, float ratio)
 	ctx->devicePxRatio = ratio;
 }
 
+static NVGstate* nvg__getState(NVGcontext* ctx)
+{
+	return &ctx->states[ctx->nstates-1];
+}
+
 NVGcontext* nvgCreateInternal(NVGparams* params)
 {
 	FONSparams fontParams;
@@ -246,6 +346,9 @@ NVGcontext* nvgCreateInternal(NVGparams* params)
 	ctx->fontImages[0] = ctx->params.renderCreateTexture(ctx->params.userPtr, NVG_TEXTURE_ALPHA, fontParams.width, fontParams.height, 0, NULL);
 	if (ctx->fontImages[0] == 0) goto error;
 	ctx->fontImageIdx = 0;
+
+	// Init display list / render callbacks
+	nvgBindDisplayList(ctx, NULL);
 
 	return ctx;
 
@@ -336,6 +439,319 @@ void nvgEndFrame(NVGcontext* ctx)
 		// clear all images after j
 		for (i = j; i < NVG_MAX_FONTIMAGES; i++)
 			ctx->fontImages[i] = 0;
+	}
+}
+
+static NVGvertex* nvg__allocDrawListVertices(NVGdisplayList* ctx, int n)
+{
+    if (ctx->nverts + n >= ctx->cverts)
+    {
+        int i;
+        NVGvertex * vertices = NULL;
+        int cverts = ctx->cverts + ((n + 0xff) & ~0xff);
+        
+        vertices = (NVGvertex*)realloc(ctx->vertices, sizeof(NVGvertex)*cverts);
+        if (vertices == NULL) return NULL;
+        
+        //patch pointers: would be nicer to use indices/handles in paths
+        for (i=0; i<ctx->npaths; ++i)
+        {
+            NVGpath * p = &ctx->paths[i];
+            p->fill = vertices + (p->fill - ctx->vertices);
+            p->stroke = vertices + (p->stroke - ctx->vertices);
+        }
+        
+        ctx->vertices = vertices;
+        ctx->cverts = cverts;
+    }
+    
+    return ctx->vertices + ctx->nverts;
+}
+
+static NVGpath* nvg__allocDrawListPaths(NVGdisplayList* ctx, int n)
+{
+    if (ctx->npaths + n >= ctx->cpaths)
+    {
+        NVGpath * paths = NULL;
+        int cpaths = ctx->cpaths + ((n + 0xff) & ~0xff);
+        
+        paths = (NVGpath*)realloc(ctx->paths, sizeof(NVGpath)*cpaths);
+        if (paths == NULL) return NULL;
+        
+        ctx->paths = paths;
+        ctx->cpaths = cpaths;
+    }
+    
+    return ctx->paths + ctx->npaths;
+}
+
+static int nvg__deepCopyPaths(NVGdisplayList* ctx, const NVGpath* paths, int npaths)
+{
+    NVGpath* path = NULL;
+    int n=0,i;
+    
+#if NVG_FILL_DISPLAYLIST_BUFFER_DIRECT
+    
+    // In this case vertex buffer is already filled (used as temporary vertex buffer; we still have increment vertex count)
+    assert(paths->fill == ctx->vertices + ctx->nverts || paths->stroke == ctx->vertices + ctx->nverts);
+    
+    path = nvg__allocDrawListPaths(ctx, npaths);
+    if (path == NULL) return -1;
+    
+    for (i=0; i<npaths; ++i)
+    {
+        path[i] = paths[i];
+        
+        n += paths[i].nfill;
+        n += paths[i].nstroke;
+    }
+    
+#else
+    
+    NVGvertex* vtx = NULL;
+    
+    for (i=0; i<npaths; ++i)
+    {
+        n += paths[i].nfill;
+        n += paths[i].nstroke;
+    }
+
+    vtx = nvg__allocDrawListVertices(ctx, n);
+    if (vtx == NULL) return -1;
+	
+    path = nvg__allocDrawListPaths(ctx, npaths);
+    if (path == NULL) return -1;
+    
+    for (i=0; i<npaths; ++i)
+	{
+		path[i] = paths[i];
+        
+        path[i].fill = vtx;
+		memcpy(path[i].fill, paths[i].fill, sizeof(NVGvertex)*paths[i].nfill);
+        vtx += paths[i].nfill;
+
+        path[i].stroke = vtx;
+		memcpy(path[i].stroke, paths[i].stroke, sizeof(NVGvertex)*paths[i].nstroke);
+        vtx += paths[i].nstroke;
+	}
+    
+#endif
+    
+    ctx->npaths += npaths;
+    ctx->nverts += n;
+    
+	return path - ctx->paths;
+}
+
+static NVGdisplayListCommand* nvg__allocDisplayListCommand(NVGdisplayList* ctx)
+{
+    if (ctx->ncommands == ctx->ccommands)
+    {
+        NVGdisplayListCommand * commands;
+        
+        int ccommands = ctx->ncommands + ctx->ccommands/2;
+        commands = (NVGdisplayListCommand*)realloc(ctx->commands, sizeof(NVGdisplayListCommand)*ccommands);
+        if (commands == NULL) return NULL;
+        
+        ctx->commands = commands;
+        ctx->ccommands = ccommands;
+    }
+    
+    return ctx->commands + ctx->ncommands;
+}
+
+static void nvg__drawListRenderFill(NVGcontext* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform, float fringe, const float* bounds, const NVGpath* paths, int npaths)
+{
+	NVGdisplayList* ctx = uptr->displayList;
+    NVGdisplayListCommand* cmd = nvg__allocDisplayListCommand(ctx);
+    if (cmd == NULL) return;
+    
+	cmd->type = NVG_COMMAND_FILL;
+	cmd->paint = *paint;
+	cmd->scissor = *scissor;
+	memcpy(cmd->xform, xform, sizeof(float)*6);
+
+	memcpy(cmd->fillParams.bounds,bounds,sizeof(float)*4);
+	cmd->fillParams.fringe = fringe;
+	cmd->fillParams.path = nvg__deepCopyPaths(ctx, paths, npaths);
+	cmd->fillParams.npaths = npaths;
+    
+    ctx->ncommands++;
+}
+
+static void nvg__drawListRenderStroke(NVGcontext* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform, float fringe, float strokeWidth, const NVGpath* paths, int npaths)
+{
+	NVGdisplayList* ctx = uptr->displayList;
+    NVGdisplayListCommand* cmd = nvg__allocDisplayListCommand(ctx);
+    if (cmd == NULL) return;
+	
+    cmd->type = NVG_COMMAND_STROKE;
+	cmd->paint = *paint;
+	cmd->scissor = *scissor;
+	memcpy(cmd->xform, xform, sizeof(float)*6);
+
+	cmd->strokeParams.fringe = fringe;
+	cmd->strokeParams.strokeWidth = strokeWidth;
+	cmd->strokeParams.path = nvg__deepCopyPaths(ctx, paths, npaths);
+	cmd->strokeParams.npaths = npaths;
+    
+    ctx->ncommands++;
+}
+
+static void nvg__drawListRenderTriangles(NVGcontext* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform, const NVGvertex* verts, int nverts)
+{
+	NVGdisplayList* ctx = uptr->displayList;
+    NVGvertex* vtx = NULL;
+    
+	NVGdisplayListCommand* cmd = nvg__allocDisplayListCommand(ctx);
+    if (cmd == NULL) return;
+    
+	cmd->type = NVG_COMMAND_TRIANGLE;
+	cmd->paint = *paint;
+	cmd->scissor = *scissor;
+	memcpy(cmd->xform, xform, sizeof(float)*6);
+    
+    vtx = nvg__allocDrawListVertices(ctx, nverts);
+    if (vtx == NULL) return;
+
+    cmd->triangleParams.vertices = vtx - ctx->vertices;
+	memcpy(vtx, verts, sizeof(NVGvertex)*nverts);
+	cmd->triangleParams.nverts = nverts;
+    
+    ctx->nverts += nverts;
+    ctx->ncommands++;
+}
+
+NVGdisplayList* nvgCreateDisplayList(int initalNumCommands)
+{
+    int ncommands = initalNumCommands > 0 ? initalNumCommands : NVG_INIT_DISPLAYLIST_COMMANDS_SIZE;
+
+    NVGdisplayList* ctx = (NVGdisplayList*)malloc(sizeof(NVGdisplayList));
+	if (ctx == NULL) goto error;
+	memset(ctx, 0, sizeof(NVGdisplayList));
+    
+	ctx->commands = (NVGdisplayListCommand*)malloc(sizeof(NVGdisplayListCommand)*ncommands);
+	if (!ctx->commands) goto error;
+	ctx->ncommands = 0;
+	ctx->ccommands = NVG_INIT_DISPLAYLIST_COMMANDS_SIZE;
+    
+    ctx->vertices = (NVGvertex*)malloc(sizeof(NVGvertex)*ncommands*NVG_INIT_DISPLAYLIST_VERTS_PER_PATH_SIZE);
+    if (!ctx->vertices) goto error;
+    ctx->nverts = 0;
+    ctx->cverts = ncommands*NVG_INIT_DISPLAYLIST_VERTS_PER_PATH_SIZE;
+    
+    ctx->paths = (NVGpath*)malloc(sizeof(NVGpath)*ncommands);
+    if (!ctx->paths) goto error;
+    ctx->npaths = 0;
+    ctx->cpaths = ncommands;
+
+	return ctx;
+
+error:
+	nvgDeleteDisplayList(ctx);
+	return 0;
+}
+
+void nvgDeleteDisplayList(NVGdisplayList* list)
+{
+	if (list != NULL)
+	{
+		nvgResetDisplayList(list);
+		
+		if (list->commands != NULL) 
+			free(list->commands);
+
+		list->commands = 0;
+        list->ccommands = 0;
+        
+        if (list->vertices != NULL)
+            free(list->vertices);
+        
+        list->vertices = 0;
+        list->cverts = 0;
+        
+        if (list->paths != NULL)
+            free(list->paths);
+        
+        list->paths = 0;
+        list->cpaths = 0;
+	}
+}
+
+void nvgBindDisplayList(NVGcontext* ctx, NVGdisplayList* list)
+{
+	if (list == NULL)
+	{
+		ctx->renderFill = nvg__renderFill;
+		ctx->renderStroke = nvg__renderStroke;
+		ctx->renderTriangles = nvg__renderTriangles;
+	}
+	else
+	{
+		ctx->renderFill = nvg__drawListRenderFill;
+		ctx->renderStroke = nvg__drawListRenderStroke;
+		ctx->renderTriangles = nvg__drawListRenderTriangles;
+	}
+
+	ctx->displayList = list;
+}
+
+void nvgResetDisplayList(NVGdisplayList* list)
+{
+	list->ncommands = 0;
+    list->nverts = 0;
+    list->npaths = 0;
+}
+
+void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
+{
+	NVGstate* state = nvg__getState(ctx);
+	float t[6];
+    NVGpaint paint;
+    NVGdisplayListCommand * cmd;
+
+	int i;
+	for (i=0; i<list->ncommands; ++i)
+	{
+		cmd = &list->commands[i];
+
+		memcpy(t, cmd->xform, sizeof(float)*6);
+		nvgTransformMultiply(t, state->xform);
+        
+        paint = cmd->paint;
+        paint.innerColor.a *= state->alpha;
+        paint.outerColor.a *= state->alpha;
+
+		switch( cmd->type )
+		{
+		case NVG_COMMAND_FILL:
+		{
+            if (cmd->fillParams.path >= 0)
+            {
+                NVGpath* paths = &list->paths[cmd->fillParams.path];
+                ctx->renderFill(ctx, &paint, &cmd->scissor, t,
+                                cmd->fillParams.fringe, cmd->fillParams.bounds, paths, cmd->fillParams.npaths);
+            }
+		} break;
+		case NVG_COMMAND_STROKE:
+		{
+            if (cmd->strokeParams.path >= 0)
+            {
+                NVGpath* paths = &list->paths[cmd->strokeParams.path];
+                ctx->renderStroke(ctx, &paint, &cmd->scissor, t,
+                                  cmd->strokeParams.fringe, cmd->strokeParams.strokeWidth, paths, cmd->strokeParams.npaths);
+            }
+		} break;
+		case NVG_COMMAND_TRIANGLE:
+		{
+            if (cmd->triangleParams.vertices >= 0)
+            {
+                NVGvertex * vtx = &list->vertices[cmd->triangleParams.vertices];
+                ctx->renderTriangles(ctx, &paint, &cmd->scissor, t,
+                                     vtx, cmd->triangleParams.nverts);
+            }
+		} break;
+		};
 	}
 }
 
@@ -432,12 +848,6 @@ NVGcolor nvgHSLA(float h, float s, float l, unsigned char a)
 	col.b = nvg__clampf(nvg__hue(h - 1.0f/3.0f, m1, m2), 0.0f, 1.0f);
 	col.a = a/255.0f;
 	return col;
-}
-
-
-static NVGstate* nvg__getState(NVGcontext* ctx)
-{
-	return &ctx->states[ctx->nstates-1];
 }
 
 void nvgTransformIdentity(float* t)
@@ -974,8 +1384,10 @@ static float nvg__distPtSeg(float x, float y, float px, float py, float qx, floa
 
 static void nvg__appendCommands(NVGcontext* ctx, float* vals, int nvals)
 {
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER
 	NVGstate* state = nvg__getState(ctx);
 	int i;
+#endif
 
 	if (ctx->ncommands+nvals > ctx->ccommands) {
 		float* commands;
@@ -991,6 +1403,7 @@ static void nvg__appendCommands(NVGcontext* ctx, float* vals, int nvals)
 		ctx->commandy = vals[nvals-1];
 	}
 
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER
 	// transform commands
 	i = 0;
 	while (i < nvals) {
@@ -1020,6 +1433,7 @@ static void nvg__appendCommands(NVGcontext* ctx, float* vals, int nvals)
 			i++;
 		}
 	}
+#endif
 
 	memcpy(&ctx->commands[ctx->ncommands], vals, nvals*sizeof(float));
 
@@ -1122,6 +1536,14 @@ static float nvg__getAverageScale(float *t)
 
 static NVGvertex* nvg__allocTempVerts(NVGcontext* ctx, int nverts)
 {
+#if NVG_FILL_DISPLAYLIST_BUFFER_DIRECT
+    if (ctx->displayList != NULL)
+    {
+        //get temporary buffer from current display list - fills display list directly
+        return nvg__allocDrawListVertices(ctx->displayList, nverts);
+    }
+#endif
+    
 	if (nverts > ctx->cache->cverts) {
 		NVGvertex* verts;
 		int cverts = (nverts + 0xff) & ~0xff; // Round up to prevent allocations when things change just slightly.
@@ -2101,7 +2523,11 @@ void nvgFill(NVGcontext* ctx)
 	NVGstate* state = nvg__getState(ctx);
 	const NVGpath* path;
 	NVGpaint fillPaint = state->fill;
+	const float * xform = state->xform;
 	int i;
+
+	float invxform[6];
+	NVGscissor scissor = state->scissor;
 
 	nvg__flattenPaths(ctx);
 	if (ctx->params.edgeAntiAlias)
@@ -2113,8 +2539,18 @@ void nvgFill(NVGcontext* ctx)
 	fillPaint.innerColor.a *= state->alpha;
 	fillPaint.outerColor.a *= state->alpha;
 
-	ctx->params.renderFill(ctx->params.userPtr, &fillPaint, &state->scissor, ctx->fringeWidth,
-						   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
+#if	!NVG_TRANSFORM_IN_VERTEX_SHADER
+	xform = NVGidentityXform;
+#else
+	//scissor and paint need to be inverse transformed.
+	nvgTransformInverse(invxform, xform);
+	nvgTransformMultiply(scissor.xform, invxform);
+	nvgTransformMultiply(fillPaint.xform, invxform);
+#endif
+
+	ctx->renderFill(ctx, &fillPaint, &scissor, xform, ctx->fringeWidth,
+					ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
+
 #if DEBUG
 	// Count triangles
 	for (i = 0; i < ctx->cache->npaths; i++) {
@@ -2132,8 +2568,12 @@ void nvgStroke(NVGcontext* ctx)
 	float scale = nvg__getAverageScale(state->xform);
 	float strokeWidth = nvg__clampf(state->strokeWidth * scale, 0.0f, 200.0f);
 	NVGpaint strokePaint = state->stroke;
+	const float * xform = state->xform;
 	const NVGpath* path;
 	int i;
+
+	float invxform[6];
+	NVGscissor scissor = state->scissor;
 
 	if (strokeWidth < ctx->fringeWidth) {
 		// If the stroke width is less than pixel size, use alpha to emulate coverage.
@@ -2155,8 +2595,18 @@ void nvgStroke(NVGcontext* ctx)
 	else
 		nvg__expandStroke(ctx, strokeWidth*0.5f, state->lineCap, state->lineJoin, state->miterLimit);
 
-	ctx->params.renderStroke(ctx->params.userPtr, &strokePaint, &state->scissor, ctx->fringeWidth,
-							 strokeWidth, ctx->cache->paths, ctx->cache->npaths);
+#if	!NVG_TRANSFORM_IN_VERTEX_SHADER
+	xform = NVGidentityXform;
+#else
+	//scissor and paint need to be inverse transformed.
+	nvgTransformInverse(invxform, xform);
+	nvgTransformMultiply(scissor.xform, invxform);
+	nvgTransformMultiply(strokePaint.xform, invxform);
+#endif
+
+	ctx->renderStroke(ctx, &strokePaint, &scissor, xform, ctx->fringeWidth,
+					  strokeWidth, ctx->cache->paths, ctx->cache->npaths);
+
 #if DEBUG
 	// Count triangles
 	for (i = 0; i < ctx->cache->npaths; i++) {
@@ -2291,6 +2741,10 @@ static void nvg__renderText(NVGcontext* ctx, NVGvertex* verts, int nverts)
 {
 	NVGstate* state = nvg__getState(ctx);
 	NVGpaint paint = state->fill;
+	const float * xform = state->xform;
+
+	float invxform[6];
+	NVGscissor scissor = state->scissor;
 
 	// Render triangles.
 	paint.image = ctx->fontImages[ctx->fontImageIdx];
@@ -2299,8 +2753,17 @@ static void nvg__renderText(NVGcontext* ctx, NVGvertex* verts, int nverts)
 	paint.innerColor.a *= state->alpha;
 	paint.outerColor.a *= state->alpha;
 
-	ctx->params.renderTriangles(ctx->params.userPtr, &paint, &state->scissor, verts, nverts);
-    
+#if	!NVG_TRANSFORM_IN_VERTEX_SHADER
+	xform = NVGidentityXform;
+#else
+	//scissor and paint need to be inverse transformed.
+	nvgTransformInverse(invxform, xform);
+	nvgTransformMultiply(scissor.xform, invxform);
+	nvgTransformMultiply(paint.xform, invxform);
+#endif
+
+	ctx->renderTriangles(ctx, &paint, &scissor, xform, verts, nverts);
+
 #if DEBUG
 	ctx->drawCallCount++;
 	ctx->textTriCount += nverts/3;
@@ -2350,11 +2813,18 @@ float nvgText(NVGcontext* ctx, float x, float y, const char* string, const char*
 				break;
 		}
 		prevIter = iter;
+#if	!NVG_TRANSFORM_IN_VERTEX_SHADER
 		// Transform corners.
 		nvgTransformPoint(&c[0],&c[1], state->xform, q.x0*invscale, q.y0*invscale);
 		nvgTransformPoint(&c[2],&c[3], state->xform, q.x1*invscale, q.y0*invscale);
 		nvgTransformPoint(&c[4],&c[5], state->xform, q.x1*invscale, q.y1*invscale);
 		nvgTransformPoint(&c[6],&c[7], state->xform, q.x0*invscale, q.y1*invscale);
+#else
+		c[0] = q.x0*invscale; c[1] = q.y0*invscale;
+		c[2] = q.x1*invscale; c[3] = q.y0*invscale;
+		c[4] = q.x1*invscale; c[5] = q.y1*invscale;
+		c[6] = q.x0*invscale; c[7] = q.y1*invscale;
+#endif
 		// Create triangles
 		if (nverts+6 <= cverts) {
 			nvg__vset(&verts[nverts], c[0], c[1], q.s0, q.t0); nverts++;
