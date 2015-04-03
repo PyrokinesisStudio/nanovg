@@ -120,10 +120,12 @@ struct NVGcontext {
 	struct FONScontext* fs;
 	int fontImages[NVG_MAX_FONTIMAGES];
 	int fontImageIdx;
+#if DEBUG
 	int drawCallCount;
 	int fillTriCount;
 	int strokeTriCount;
 	int textTriCount;
+#endif
 };
 
 static float nvg__sqrtf(float a) { return sqrtf(a); }
@@ -293,11 +295,13 @@ void nvgBeginFrame(NVGcontext* ctx, int windowWidth, int windowHeight, float dev
 	nvg__setDevicePixelRatio(ctx, devicePixelRatio);
 	
 	ctx->params.renderViewport(ctx->params.userPtr, windowWidth, windowHeight);
-
+	
+#if DEBUG
 	ctx->drawCallCount = 0;
 	ctx->fillTriCount = 0;
 	ctx->strokeTriCount = 0;
 	ctx->textTriCount = 0;
+#endif
 }
 
 void nvgCancelFrame(NVGcontext* ctx)
@@ -854,7 +858,15 @@ NVGpaint nvgImagePattern(NVGcontext* ctx,
 	NVG_NOTUSED(ctx);
 	memset(&p, 0, sizeof(p));
 
-	nvgTransformRotate(p.xform, angle);
+	if (angle == 0) // most likly case (no rotation, identity transform)
+	{
+		p.xform[0] = 1; p.xform[1] = 0;
+		p.xform[2] = 0; p.xform[3] = 1;
+	}
+	else
+	{
+		nvgTransformRotate(p.xform, angle);
+	}
 	p.xform[4] = cx;
 	p.xform[5] = cy;
 
@@ -2103,7 +2115,7 @@ void nvgFill(NVGcontext* ctx)
 
 	ctx->params.renderFill(ctx->params.userPtr, &fillPaint, &state->scissor, ctx->fringeWidth,
 						   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
-
+#if DEBUG
 	// Count triangles
 	for (i = 0; i < ctx->cache->npaths; i++) {
 		path = &ctx->cache->paths[i];
@@ -2111,6 +2123,7 @@ void nvgFill(NVGcontext* ctx)
 		ctx->fillTriCount += path->nstroke-2;
 		ctx->drawCallCount += 2;
 	}
+#endif
 }
 
 void nvgStroke(NVGcontext* ctx)
@@ -2144,13 +2157,14 @@ void nvgStroke(NVGcontext* ctx)
 
 	ctx->params.renderStroke(ctx->params.userPtr, &strokePaint, &state->scissor, ctx->fringeWidth,
 							 strokeWidth, ctx->cache->paths, ctx->cache->npaths);
-
+#if DEBUG
 	// Count triangles
 	for (i = 0; i < ctx->cache->npaths; i++) {
 		path = &ctx->cache->paths[i];
 		ctx->strokeTriCount += path->nstroke-2;
 		ctx->drawCallCount++;
 	}
+#endif
 }
 
 // Add fonts
@@ -2162,6 +2176,13 @@ int nvgCreateFont(NVGcontext* ctx, const char* name, const char* path)
 int nvgCreateFontMem(NVGcontext* ctx, const char* name, unsigned char* data, int ndata, int freeData)
 {
 	return fonsAddFontMem(ctx->fs, name, data, ndata, freeData);
+}
+
+// Add font fallback for existing fonts
+void nvgDefineGlyphFallbackRange(NVGcontext* ctx, int baseFont, int fallbackFont, 
+						unsigned int begin, unsigned int end, float scale)
+{
+	fonsDefineGlyphFallbackRange(ctx->fs, baseFont, fallbackFont, begin, end, scale);
 }
 
 int nvgFindFont(NVGcontext* ctx, const char* name)
@@ -2279,9 +2300,11 @@ static void nvg__renderText(NVGcontext* ctx, NVGvertex* verts, int nverts)
 	paint.outerColor.a *= state->alpha;
 
 	ctx->params.renderTriangles(ctx->params.userPtr, &paint, &state->scissor, verts, nverts);
-
+    
+#if DEBUG
 	ctx->drawCallCount++;
 	ctx->textTriCount += nverts/3;
+#endif
 }
 
 float nvgText(NVGcontext* ctx, float x, float y, const char* string, const char* end)
@@ -2419,6 +2442,7 @@ int nvgTextGlyphPositions(NVGcontext* ctx, float x, float y, const char* string,
 		positions[npos].x = iter.x * invscale;
 		positions[npos].minx = nvg__minf(iter.x, q.x0) * invscale;
 		positions[npos].maxx = nvg__maxf(iter.nextx, q.x1) * invscale;
+		positions[npos].next = iter.next;
 		npos++;
 		if (npos >= maxPositions)
 			break;
@@ -2431,6 +2455,7 @@ enum NVGcodepointType {
 	NVG_SPACE,
 	NVG_NEWLINE,
 	NVG_CHAR,
+    NVG_HYPHEN
 };
 
 int nvgTextBreakLines(NVGcontext* ctx, const char* string, const char* end, float breakRowWidth, NVGtextRow* rows, int maxRows)
@@ -2497,6 +2522,9 @@ int nvgTextBreakLines(NVGcontext* ctx, const char* string, const char* end, floa
 			case 0x0085:	// NEL
 				type = NVG_NEWLINE;
 				break;
+            case '-':       // delimiter if previous glyph was char
+                type = (ptype == NVG_CHAR && pcodepoint != '-') ? NVG_HYPHEN : NVG_CHAR;
+                break;
 			default:
 				type = NVG_CHAR;
 				break;
@@ -2545,19 +2573,19 @@ int nvgTextBreakLines(NVGcontext* ctx, const char* string, const char* end, floa
 				float nextWidth = iter.nextx - rowStartX;
 
 				// track last non-white space character
-				if (type == NVG_CHAR) {
+				if (type == NVG_CHAR || type == NVG_HYPHEN) {
 					rowEnd = iter.next;
 					rowWidth = iter.nextx - rowStartX;
 					rowMaxX = q.x1 - rowStartX;
 				}
 				// track last end of a word
-				if (ptype == NVG_CHAR && type == NVG_SPACE) {
-					breakEnd = iter.str;
+				if ((ptype == NVG_CHAR && type == NVG_SPACE) || (ptype == NVG_HYPHEN && type == NVG_CHAR)) {
+                    breakEnd = iter.str;
 					breakWidth = rowWidth;
 					breakMaxX = rowMaxX;
 				}
 				// track last beginning of a word
-				if (ptype == NVG_SPACE && type == NVG_CHAR) {
+				if ((ptype == NVG_SPACE || ptype == NVG_HYPHEN) && type == NVG_CHAR) {
 					wordStart = iter.str;
 					wordStartX = iter.x;
 					wordMinX = q.x0 - rowStartX;

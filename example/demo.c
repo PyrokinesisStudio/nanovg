@@ -835,6 +835,9 @@ int loadDemoData(NVGcontext* vg, DemoData* data)
 		return -1;
 	}
 
+    // combine icon and normal text font
+	nvgDefineGlyphFallbackRange(vg, data->fontNormal, data->fontIcons, 0x2016, 0x2795, 1.4f);
+
 	return 0;
 }
 
@@ -853,7 +856,7 @@ void drawParagraph(NVGcontext* vg, float x, float y, float width, float height, 
 {
 	NVGtextRow rows[3];
 	NVGglyphPosition glyphs[100];
-	const char* text = "This is longer chunk of text.\n  \n  Would have used lorem ipsum but she    was busy jumping over the lazy dog with the fox and all the men who came to the aid of the party.";
+	const char* text = "This is longer chunk of text \u2712.\n  \n  Would have used state-of-the-art lorem ipsum but she    was busy jumping over the lazy dog with the fox and all the Men who came to the aid of the party.";
 	const char* start;
 	const char* end;
 	int nrows, i, nglyphs, j, lnum = 0;

@@ -87,6 +87,7 @@ struct NVGglyphPosition {
 	const char* str;	// Position of the glyph in the input string.
 	float x;			// The x-coordinate of the logical glyph position.
 	float minx, maxx;	// The bounds of the glyph shape.
+	const char* next;	// Pointer to next glyph to be processed.
 };
 typedef struct NVGglyphPosition NVGglyphPosition;
 
@@ -490,6 +491,12 @@ int nvgCreateFont(NVGcontext* ctx, const char* name, const char* filename);
 // Creates image by loading it from the specified memory chunk.
 // Returns handle to the font.
 int nvgCreateFontMem(NVGcontext* ctx, const char* name, unsigned char* data, int ndata, int freeData);
+
+// Add font fallback for existing fonts. This can be used to easily mix an custom icon font
+// with a system text font, e.g. draw all glyphs in custom unicode range (0xe000 .. 0xefff) with different font.
+// The relative scale for the replaced glyphs can be defined: 1.0f is default.
+void nvgDefineGlyphFallbackRange(NVGcontext* ctx, int baseFont, int fallbackFont, 
+								unsigned int begin, unsigned int end, float scale);
 
 // Finds a loaded font of specified name, and returns handle to it, or -1 if the font is not found.
 int nvgFindFont(NVGcontext* ctx, const char* name);
