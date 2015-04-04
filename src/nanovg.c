@@ -297,6 +297,13 @@ static void nvg__setDevicePixelRatio(NVGcontext* ctx, float ratio)
 	ctx->devicePxRatio = ratio;
 }
 
+static float nvg__getAverageScale(float *t)
+{
+    float sx = sqrtf(t[0]*t[0] + t[2]*t[2]);
+    float sy = sqrtf(t[1]*t[1] + t[3]*t[3]);
+    return (sx + sy) * 0.5f;
+}
+
 static NVGstate* nvg__getState(NVGcontext* ctx)
 {
 	return &ctx->states[ctx->nstates-1];
@@ -709,8 +716,9 @@ void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
 	float t[6];
     NVGpaint paint;
     NVGdisplayListCommand * cmd;
-
-	int i;
+    float invscale = 1.0f / nvg__getAverageScale(state->xform);
+   
+    int i;
 	for (i=0; i<list->ncommands; ++i)
 	{
 		cmd = &list->commands[i];
@@ -729,8 +737,10 @@ void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
             if (cmd->fillParams.path >= 0)
             {
                 NVGpath* paths = &list->paths[cmd->fillParams.path];
+                float fringe = cmd->fillParams.fringe * invscale;
+
                 ctx->renderFill(ctx, &paint, &cmd->scissor, t,
-                                cmd->fillParams.fringe, cmd->fillParams.bounds, paths, cmd->fillParams.npaths);
+                                fringe, cmd->fillParams.bounds, paths, cmd->fillParams.npaths);
             }
 		} break;
 		case NVG_COMMAND_STROKE:
@@ -738,8 +748,10 @@ void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
             if (cmd->strokeParams.path >= 0)
             {
                 NVGpath* paths = &list->paths[cmd->strokeParams.path];
+                float fringe = cmd->strokeParams.fringe * invscale;
+
                 ctx->renderStroke(ctx, &paint, &cmd->scissor, t,
-                                  cmd->strokeParams.fringe, cmd->strokeParams.strokeWidth, paths, cmd->strokeParams.npaths);
+                                  fringe, cmd->strokeParams.strokeWidth, paths, cmd->strokeParams.npaths);
             }
 		} break;
 		case NVG_COMMAND_TRIANGLE:
@@ -1527,13 +1539,6 @@ static void nvg__pathWinding(NVGcontext* ctx, int winding)
 	path->winding = winding;
 }
 
-static float nvg__getAverageScale(float *t)
-{
-	float sx = sqrtf(t[0]*t[0] + t[2]*t[2]);
-	float sy = sqrtf(t[1]*t[1] + t[3]*t[3]);
-	return (sx + sy) * 0.5f;
-}
-
 static NVGvertex* nvg__allocTempVerts(NVGcontext* ctx, int nverts)
 {
 #if NVG_FILL_DISPLAYLIST_BUFFER_DIRECT
@@ -2037,14 +2042,14 @@ static void nvg__calculateJoins(NVGcontext* ctx, float w, int lineJoin, float mi
 }
 
 
-static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin, float miterLimit)
+static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin, float miterLimit, float scale)
 {	
 	NVGpathCache* cache = ctx->cache;
 	NVGvertex* verts;
 	NVGvertex* dst;
 	int cverts, i, j;
-	float aa = ctx->fringeWidth;
-	int ncap = nvg__curveDivs(w, NVG_PI, ctx->tessTol);	// Calculate divisions per half circle.
+	float aa = ctx->fringeWidth * scale;
+	int ncap = nvg__curveDivs(w, NVG_PI, ctx->tessTol * scale);	// Calculate divisions per half circle.
 
 	nvg__calculateJoins(ctx, w, lineJoin, miterLimit);
 
@@ -2152,13 +2157,13 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin
 	return 1;
 }
 
-static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLimit)
+static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLimit, float scale)
 {
 	NVGpathCache* cache = ctx->cache;
 	NVGvertex* verts;
 	NVGvertex* dst;
 	int cverts, convex, i, j;
-	float aa = ctx->fringeWidth;
+	float aa = ctx->fringeWidth * scale;
 	int fringe = w > 0.0f;
 
 	nvg__calculateJoins(ctx, w, lineJoin, miterLimit);
@@ -2249,7 +2254,7 @@ static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLi
 
 			for (j = 0; j < path->count; ++j) {
 				if ((p1->flags & (NVG_PT_BEVEL | NVG_PR_INNERBEVEL)) != 0) {
-					dst = nvg__bevelJoin(dst, p0, p1, lw, rw, lu, ru, ctx->fringeWidth);
+					dst = nvg__bevelJoin(dst, p0, p1, lw, rw, lu, ru, ctx->fringeWidth * scale);
 				} else {
 					nvg__vset(dst, p1->x + (p1->dmx * lw), p1->y + (p1->dmy * lw), lu,1); dst++;
 					nvg__vset(dst, p1->x - (p1->dmx * rw), p1->y - (p1->dmy * rw), ru,1); dst++;
@@ -2522,18 +2527,24 @@ void nvgFill(NVGcontext* ctx)
 {
 	NVGstate* state = nvg__getState(ctx);
 	const NVGpath* path;
+#if	NVG_TRANSFORM_IN_VERTEX_SHADER
+    float invscale = 1.0f / nvg__getAverageScale(state->xform);
+    float invxform[6];
+#else
+    float invscale = 1.0f;
+#endif
+    float fringeWidth = ctx->fringeWidth * invscale;
 	NVGpaint fillPaint = state->fill;
 	const float * xform = state->xform;
 	int i;
 
-	float invxform[6];
 	NVGscissor scissor = state->scissor;
 
 	nvg__flattenPaths(ctx);
 	if (ctx->params.edgeAntiAlias)
-		nvg__expandFill(ctx, ctx->fringeWidth, NVG_MITER, 2.4f);
+		nvg__expandFill(ctx, fringeWidth, NVG_MITER, 2.4f, invscale);
 	else
-		nvg__expandFill(ctx, 0.0f, NVG_MITER, 2.4f);
+		nvg__expandFill(ctx, 0.0f, NVG_MITER, 2.4f, invscale);
 
 	// Apply global alpha
 	fillPaint.innerColor.a *= state->alpha;
@@ -2548,7 +2559,7 @@ void nvgFill(NVGcontext* ctx)
 	nvgTransformMultiply(fillPaint.xform, invxform);
 #endif
 
-	ctx->renderFill(ctx, &fillPaint, &scissor, xform, ctx->fringeWidth,
+	ctx->renderFill(ctx, &fillPaint, &scissor, xform, fringeWidth,
 					ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
 
 #if DEBUG
@@ -2565,23 +2576,30 @@ void nvgFill(NVGcontext* ctx)
 void nvgStroke(NVGcontext* ctx)
 {
 	NVGstate* state = nvg__getState(ctx);
-	float scale = nvg__getAverageScale(state->xform);
+#if	NVG_TRANSFORM_IN_VERTEX_SHADER
+    float invscale = 1.0f / nvg__getAverageScale(state->xform);
+    float scale = 1.0f;
+    float invxform[6];
+#else
+    float scale = nvg__getAverageScale(state->xform);
+    float invscale = 1.0f;
+#endif
 	float strokeWidth = nvg__clampf(state->strokeWidth * scale, 0.0f, 200.0f);
+    float fringeWidth = ctx->fringeWidth * invscale;
 	NVGpaint strokePaint = state->stroke;
 	const float * xform = state->xform;
 	const NVGpath* path;
 	int i;
 
-	float invxform[6];
 	NVGscissor scissor = state->scissor;
 
-	if (strokeWidth < ctx->fringeWidth) {
+	if (strokeWidth < fringeWidth) {
 		// If the stroke width is less than pixel size, use alpha to emulate coverage.
 		// Since coverage is area, scale by alpha*alpha.
 		float alpha = nvg__clampf(strokeWidth / ctx->fringeWidth, 0.0f, 1.0f);
 		strokePaint.innerColor.a *= alpha*alpha;
 		strokePaint.outerColor.a *= alpha*alpha;
-		strokeWidth = ctx->fringeWidth;
+		strokeWidth = fringeWidth;
 	}
 
 	// Apply global alpha
@@ -2591,9 +2609,10 @@ void nvgStroke(NVGcontext* ctx)
 	nvg__flattenPaths(ctx);
 
 	if (ctx->params.edgeAntiAlias)
-		nvg__expandStroke(ctx, strokeWidth*0.5f + ctx->fringeWidth*0.5f, state->lineCap, state->lineJoin, state->miterLimit);
+		nvg__expandStroke(ctx, strokeWidth*0.5f + fringeWidth*0.5f,
+                          state->lineCap, state->lineJoin, state->miterLimit, invscale);
 	else
-		nvg__expandStroke(ctx, strokeWidth*0.5f, state->lineCap, state->lineJoin, state->miterLimit);
+		nvg__expandStroke(ctx, strokeWidth*0.5f, state->lineCap, state->lineJoin, state->miterLimit, invscale);
 
 #if	!NVG_TRANSFORM_IN_VERTEX_SHADER
 	xform = NVGidentityXform;
@@ -2604,7 +2623,7 @@ void nvgStroke(NVGcontext* ctx)
 	nvgTransformMultiply(strokePaint.xform, invxform);
 #endif
 
-	ctx->renderStroke(ctx, &strokePaint, &scissor, xform, ctx->fringeWidth,
+	ctx->renderStroke(ctx, &strokePaint, &scissor, xform, fringeWidth,
 					  strokeWidth, ctx->cache->paths, ctx->cache->npaths);
 
 #if DEBUG
@@ -2742,8 +2761,9 @@ static void nvg__renderText(NVGcontext* ctx, NVGvertex* verts, int nverts)
 	NVGstate* state = nvg__getState(ctx);
 	NVGpaint paint = state->fill;
 	const float * xform = state->xform;
-
+#if	NVG_TRANSFORM_IN_VERTEX_SHADER
 	float invxform[6];
+#endif
 	NVGscissor scissor = state->scissor;
 
 	// Render triangles.
