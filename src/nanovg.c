@@ -1912,15 +1912,16 @@ static NVGvertex* nvg__squareCapStart(NVGvertex* dst, NVGpoint* p, float dx, flo
     float dyw = dy * capLen;
     float px = p->x + dxo;
     float py = p->y + dyo;
+    float v = (offset / w) * 0.5f;
     
     nvg__vset(dst, px - dlx, py - dly, 0,1); dst++;
-    nvg__vset(dst, px, py, 0.5f,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
 
     nvg__vset(dst, px - dlx - dxw - dxo, py - dly - dyw - dyo, 0,1); dst++;
-    nvg__vset(dst, px, py, 0.5f,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
 
     nvg__vset(dst, px + dlx - dxw - dxo, py + dly - dyw - dyo, 0,1); dst++;
-    nvg__vset(dst, px, py, 0.5f,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
 
     nvg__vset(dst, px + dlx, py + dly, 0,1); dst++;
     nvg__vset(dst, px - dlx, py - dly, 1,1); dst++;
@@ -1938,20 +1939,21 @@ static NVGvertex* nvg__squareCapEnd(NVGvertex* dst, NVGpoint* p, float dx, float
     float dyw = dy * capLen;
     float px = p->x - dxo;
     float py = p->y - dyo;
+    float v = (offset / w) * 0.5f;
     
     nvg__vset(dst, px + dlx, py + dly, 0,1); dst++;
     nvg__vset(dst, px - dlx, py - dly, 1,1); dst++;
     
-    //nvg__vset(dst, px, py, 0.5f,1); dst++;
-    //nvg__vset(dst, px - dlx, py - dly, 0,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
+    nvg__vset(dst, px - dlx, py - dly, 0,1); dst++;
 
-    nvg__vset(dst, px, py, 0.5f,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
     nvg__vset(dst, px - dlx + dxw + dxo, py - dly + dyw + dyo, 0,1); dst++;
     
-    nvg__vset(dst, px, py, 0.5f,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
     nvg__vset(dst, px + dlx + dxw + dxo, py + dly + dyw + dyo, 0,1); dst++;
     
-    nvg__vset(dst, px, py, 0.5f,1); dst++;
+    nvg__vset(dst, px, py, v,1); dst++;
     nvg__vset(dst, px + dlx, py + dly, 0,1); dst++;
     
     return dst;
@@ -2121,8 +2123,14 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin
 			// space for caps
 			if (lineCap == NVG_ROUND) {
 				cverts += (ncap*2 + 2)*2;
-			} else {
+            } else if (lineCap == NVG_SQUARE) {
+                cverts += (4+5)*2;
+            } else {
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER
 				cverts += (3+3)*2;
+#else
+                cverts += (4+5)*2;
+#endif
 			}
 		}
 	}
@@ -2169,7 +2177,7 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin
 #if !NVG_TRANSFORM_IN_VERTEX_SHADER
 				dst = nvg__buttCapStart(dst, p0, dx, dy, w, -aa*0.5f, aa);
 #else
-                dst = nvg__squareCapStart(dst, p0, dx, dy, w, w < l ? w : l * 0.25f, 0);
+                dst = nvg__squareCapStart(dst, p0, dx, dy, w, w < l ? w : l * 0.25f, aa*0.5f);
 #endif
 			else if (lineCap == NVG_SQUARE)
                 dst = nvg__squareCapStart(dst, p0, dx, dy, w, w, w);
@@ -2204,7 +2212,7 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin
 #if !NVG_TRANSFORM_IN_VERTEX_SHADER
 				dst = nvg__buttCapEnd(dst, p1, dx, dy, w, -aa*0.5f, aa);
 #else
-                dst = nvg__squareCapEnd(dst, p1, dx, dy, w, w < l ? w : l * 0.25f, 0);
+                dst = nvg__squareCapEnd(dst, p1, dx, dy, w, w < l ? w : l * 0.25f, aa*0.5f);
 #endif
 			else if (lineCap == NVG_SQUARE)
                 dst = nvg__squareCapEnd(dst, p1, dx, dy, w, w, w);
