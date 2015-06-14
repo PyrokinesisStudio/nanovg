@@ -558,10 +558,11 @@ static NVGdisplayListCommand* nvg__allocDisplayListCommand(NVGdisplayList* ctx)
     {
         NVGdisplayListCommand * commands;
 		
+		int ccommands;
 		int grow = ctx->ccommands/2;
 		if (grow < 4) grow = 4;
 		
-        int ccommands = ctx->ncommands + grow;
+        ccommands = ctx->ncommands + grow;
         commands = (NVGdisplayListCommand*)realloc(ctx->commands, sizeof(NVGdisplayListCommand)*ccommands);
         if (commands == NULL) return NULL;
         
@@ -719,7 +720,8 @@ void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
 {
 	NVGstate* state = nvg__getState(ctx);
 	float t[6];
-    NVGpaint paint;
+    int i;
+	NVGpaint paint;
 	NVGscissor tmpScissor;
     NVGdisplayListCommand * cmd;
     float invscale = 1.0f / nvg__getAverageScale(state->xform);
@@ -734,7 +736,6 @@ void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
 		nvgTransformMultiply(currentScissor.xform, invStateTx);
 	}
 	
-    int i;
 	for (i=0; i<list->ncommands; ++i)
 	{
 		cmd = &list->commands[i];

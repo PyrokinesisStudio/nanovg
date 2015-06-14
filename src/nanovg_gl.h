@@ -682,8 +682,8 @@ static int glnvg__renderCreate(void* uptr)
 		"#endif\n"
 		"}\n";
 
-	glnvg__checkError(gl, "init", __LINE__);
 	const char* options = NULL;
+	glnvg__checkError(gl, "init", __LINE__);
 
 	if (gl->flags & NVG_ANTIALIAS) {
 		options = "#define EDGE_AA 1\n"
