@@ -149,7 +149,10 @@ void nvgResetDisplayList(NVGdisplayList* list);
 // Draws the cached geometry by passing it to the back end. The current transform and global alpha is
 // applied to the display list.
 void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list);
-
+	
+// Check if the texture atlas changed and we need to recreate display lists. Must be called before nvgEndFrame!
+int nvgFindOutdatedDisplayListResources(NVGcontext * ctx);
+	
 //
 // Color utils
 //
@@ -475,6 +478,12 @@ void nvgFill(NVGcontext* ctx);
 
 // Fills the current path with current stroke style.
 void nvgStroke(NVGcontext* ctx);
+
+// Additional functions that will draw simple geometries fast.
+// No antialiasing -just pure triangles. Helpful for rendering bitmaps
+// uv parameter is optional (float[4]: minx, miny, maxx, maxy)
+void nvgFillRectSimple(NVGcontext* ctx, float x, float y, float w, float h, const float * uv);
+void nvgStrokeRectSimple(NVGcontext* ctx, float x, float y, float w, float h, const float * uv);
 
 
 //
