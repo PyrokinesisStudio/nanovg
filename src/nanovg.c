@@ -3394,19 +3394,21 @@ int nvgTextBreakLines(NVGcontext* ctx, const char* string, const char* end, floa
 				}
 			} else {
 				float nextWidth = iter.nextx - rowStartX;
-
-				// track last non-white space character
+                
+                // track last end of a word
+                if ((ptype == NVG_CHAR && type == NVG_SPACE) || (ptype == NVG_HYPHEN && type == NVG_CHAR)) {
+                    breakEnd = iter.str;
+                    breakWidth = rowWidth;
+                    breakMaxX = rowMaxX;
+                }
+				
+                // track last non-white space character
 				if (type == NVG_CHAR || type == NVG_HYPHEN) {
 					rowEnd = iter.next;
 					rowWidth = iter.nextx - rowStartX;
 					rowMaxX = q.x1 - rowStartX;
 				}
-				// track last end of a word
-				if ((ptype == NVG_CHAR && type == NVG_SPACE) || (ptype == NVG_HYPHEN && type == NVG_CHAR)) {
-                    breakEnd = iter.str;
-					breakWidth = rowWidth;
-					breakMaxX = rowMaxX;
-				}
+				
 				// track last beginning of a word
 				if ((ptype == NVG_SPACE || ptype == NVG_HYPHEN) && type == NVG_CHAR) {
 					wordStart = iter.str;
