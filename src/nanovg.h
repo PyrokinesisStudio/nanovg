@@ -636,9 +636,9 @@ struct NVGparams {
 	void (*renderFill)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
                        float fringe, const float* bounds, const NVGpath* paths, int npaths);
 	void (*renderStroke)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
-                         float fringe, float strokeWidth, const NVGpath* paths, int npaths);
+                         float fringe, float strokeWidth, const float* bounds, const NVGpath* paths, int npaths);
 	void (*renderTriangles)(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
-                            const NVGvertex* verts, int nverts);
+                            const float* bounds, const NVGvertex* verts, int nverts);
 	void (*renderDelete)(void* uptr);
 };
 typedef struct NVGparams NVGparams;

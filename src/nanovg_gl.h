@@ -172,6 +172,7 @@ struct GLNVGcall {
 	int triangleCount;
 	int uniformOffset;
 	float xform[6];
+    float bounds[4];
 };
 typedef struct GLNVGcall GLNVGcall;
 
@@ -1136,11 +1137,182 @@ static void glnvg__renderCancel(void* uptr) {
 	gl->nuniforms = 0;
 }
 
+#if 1 //SORT
+
+struct GLNVGrenderBatch
+{
+    int image;
+    float bounds[4];
+};
+typedef struct GLNVGrenderBatch GLNVGrenderBatch;
+
+static float glnvg__minf(float a, float b) { return a < b ? a : b; }
+static float glnvg__maxf(float a, float b) { return a > b ? a : b; }
+static float glnvg__absf(float a) { return a >= 0.0f ? a : -a; }
+static float glnvg__clampf(float a, float mn, float mx) { return a < mn ? mn : (a > mx ? mx : a); }
+
+static void glnvg__scissorRect(const NVGscissor * scissor, const float * tx, float * rect )
+{
+    float ptx[6];
+    float ex, ey, tex, tey;
+    const float * pxform = scissor->xform;
+    
+    ex = scissor->extent[0];
+    ey = scissor->extent[1];
+
+    if (tx)
+    {
+        memcpy(ptx, scissor->xform, sizeof(float)*6);
+        nvgTransformMultiply(ptx, tx);
+        pxform = ptx;
+    }
+
+    tex = ex*glnvg__absf(pxform[0]) + ey*glnvg__absf(pxform[2]);
+    tey = ex*glnvg__absf(pxform[1]) + ey*glnvg__absf(pxform[3]);
+
+    // Intersect rects (x, y, width, height);
+    rect[0] = pxform[4]-tex;
+    rect[1] = pxform[5]-tey;
+    rect[2] = rect[0] + tex*2;
+    rect[3] = rect[1] + tey*2;
+}
+
+void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * scissor, float * result)
+{
+    float x, y;
+    const float verts[] =
+    {
+        bounds[0], bounds[1],
+        bounds[0], bounds[3],
+        bounds[2], bounds[1],
+        bounds[2], bounds[3]
+    };
+    
+    result[0] = result[1] = 1e6f;
+    result[2] = result[3] = -1e6f;
+    
+    for (int i=0; i<8; i+=2)
+    {
+        x = verts[i]*t[0] + verts[i+1]*t[2] + t[4];
+        y = verts[i]*t[1] + verts[i+1]*t[3] + t[5];
+    
+        result[0] = glnvg__minf(result[0], x);
+        result[1] = glnvg__minf(result[1], y);
+        result[2] = glnvg__maxf(result[2], x);
+        result[3] = glnvg__maxf(result[3], y);
+    }
+    
+    if (scissor->extent[0] > 0)
+    {
+        float clip[4];
+        glnvg__scissorRect(scissor, t, clip);
+        result[0] = glnvg__clampf(result[0], clip[0], clip[2]);
+        result[1] = glnvg__clampf(result[1], clip[1], clip[3]);
+        result[2] = glnvg__clampf(result[2], clip[0], clip[2]);
+        result[3] = glnvg__clampf(result[3], clip[1], clip[3]);
+    }
+}
+
+void glnvg_batchInit(GLNVGrenderBatch *b, int img)
+{
+    b->image = img;
+    b->bounds[0] = b->bounds[1] = 1e6f;
+    b->bounds[2] = b->bounds[3] = -1e6f;
+}
+
+int glnvg_batchIntersects(GLNVGrenderBatch * batch, const float* b)
+{
+    return (b[0] <= batch->bounds[2] && b[2] >= batch->bounds[0]) &&
+    (b[1] <= batch->bounds[3] && b[3] >= batch->bounds[1]) ? 1 : 0;
+}
+static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+                                   const float* bounds, const NVGvertex* verts, int nverts);
+#include "nanovg.h"
+#endif
+
+
 static void glnvg__renderFlush(void* uptr)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
 	float xform[9];
 	int i;
+    
+    
+#if 1 //SORT RENDER CALLS
+    static int a = 0;
+    if (a == 0)
+    {
+        a = 1;
+        int calls = gl->ncalls;
+    GLNVGrenderBatch batches[256];
+    
+    
+    for (i = 0; i < calls; i++) {
+        GLNVGcall* call = &gl->calls[i];
+        
+        const float *bounds = call->bounds;//[4];
+        //glnvg_transformBounds(call->bounds, call->xform, bounds);
+        
+        float x1 = bounds[0];
+        float y1 = bounds[1];
+        float x2 = bounds[2];
+        float y2 = bounds[3];
+        
+        const float l = 2;
+        float w = x2- x1;
+        float h = y2- y1;
+        
+        if (w < 0)
+        {
+            float s = x2; x2 = x1; x1 = s;
+        }
+        if (h < 0)
+        {
+            float s = y2; y2 = y1; y1 = s;
+        }
+        
+        const float t[] = { 0, 0, 1, 1 };
+        const float sx = l / w, sy = l / h;
+        
+        const float iV[] = { x1+l, y1+l, x2-l, y2-l };
+        const float iT[] = { t[0]+sx, t[1]+sy, t[2]-sx, t[3]-sy };
+        
+        NVGvertex verts[] =
+        {
+            //top
+            {x1, y1, t[0], t[1]}, {iV[2], iV[1], iT[2], iT[1]}, {x2, y1, t[2], t[1]},
+            {x1, y1, t[0], t[1]}, {iV[0], iV[1], iT[0], iT[1]}, {iV[2], iV[1], iT[2], iT[1]},
+            //right
+            {iV[2], iV[1], iT[2], iT[1]}, {x2, y2, t[2], t[3]}, {x2, y1, t[2], t[1]},
+            {iV[2], iV[1], iT[2], iT[1]}, {iV[2], iV[3], iT[2], iT[3]},	{x2, y2, t[2], t[3]},
+            //bottom
+            {iV[0], iV[3], iT[0], iT[3]}, {x2, y2, t[2], t[3]}, {iV[2], iV[3], iT[2], iT[3]},
+            {iV[0], iV[3], iT[0], iT[3]}, {x1, y2, t[0], t[3]}, {x2, y2, t[2], t[3]},
+            //left
+            {x1, y1, t[0], t[1]}, {iV[0], iV[3], iT[0], iT[3]},	{iV[0], iV[1], iT[0], iT[1]},
+            {x1, y1, t[0], t[1]}, {x1, y2, t[0], t[3]}, {iV[0], iV[3], iT[0], iT[3]}	
+        };
+
+
+        NVGpaint paint = {};
+        nvgTransformIdentity(paint.xform);
+        paint.radius = 0.0f;
+        paint.feather = 1.0f;
+        paint.innerColor = nvgRGBAf(1, 0, 0, 0.8);
+        paint.outerColor = nvgRGBAf(1, 0, 0, 0.8);
+        NVGscissor scissor = {};
+        scissor.extent[0] = -1.0f;
+        scissor.extent[1] = -1.0f;
+        
+        glnvg__renderTriangles(uptr, &paint, &scissor,
+                               paint.xform, //identity
+                               //call->xform,
+                               bounds, (NVGvertex*)verts, 6*4);
+    }
+        a = 0;
+    }
+#endif
+
 	
 	if (gl->ncalls > 0) {
 
@@ -1208,9 +1380,9 @@ static void glnvg__renderFlush(void* uptr)
 #endif
 
 #if !NVG_TRANSFORM_IN_VERTEX_SHADER //just set once
-	glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
+        glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
 #endif
-
+        
 		for (i = 0; i < gl->ncalls; i++) {
 			GLNVGcall* call = &gl->calls[i];
 
@@ -1230,7 +1402,7 @@ static void glnvg__renderFlush(void* uptr)
 			else if (call->type == GLNVG_TRIANGLES)
 				glnvg__triangles(gl, call);
 		}
-
+        
 		glDisableVertexAttribArray(0);
 		glDisableVertexAttribArray(1);
 #if defined NANOVG_GL3
@@ -1354,6 +1526,8 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
+    glnvg_worldBounds(bounds, xform, scissor, call->bounds);
+    
 
 	if (npaths == 1 && paths[0].convex)
 		call->type = GLNVG_CONVEXFILL;
@@ -1420,7 +1594,7 @@ error:
 }
 
 static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform, float fringe,
-								float strokeWidth, const NVGpath* paths, int npaths)
+								float strokeWidth, const float* bounds, const NVGpath* paths, int npaths)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
 	GLNVGcall* call = glnvg__allocCall(gl);
@@ -1435,6 +1609,7 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
+    glnvg_worldBounds(bounds, xform, scissor, call->bounds);
 
 	// Allocate vertices for all the paths.
 	maxverts = glnvg__maxVertCount(paths, npaths);
@@ -1477,7 +1652,7 @@ error:
 }
 
 static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
-								   const NVGvertex* verts, int nverts)
+								   const float* bounds, const NVGvertex* verts, int nverts)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
 	GLNVGcall* call = glnvg__allocCall(gl);
@@ -1489,7 +1664,8 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scis
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
-
+    glnvg_worldBounds(bounds, xform, scissor, call->bounds);
+    
 	// Allocate vertices for all the paths.
 	call->triangleOffset = glnvg__allocVerts(gl, nverts);
 	if (call->triangleOffset == -1) goto error;
