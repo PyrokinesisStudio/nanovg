@@ -3162,6 +3162,9 @@ float nvgText(NVGcontext* ctx, float x, float y, const char* string, const char*
 
 	if (end == NULL)
 		end = string + strlen(string);
+    
+    if (end == string)
+        memset(bounds, 0, sizeof(float)*4);
 
 	if (state->fontId == FONS_INVALID) return x;
 

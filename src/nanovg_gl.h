@@ -993,8 +993,10 @@ static void glnvg__setUniforms(GLNVGcontext* gl, int uniformOffset, int image)
 #if NANOVG_GL_USE_UNIFORMBUFFER
 	glBindBufferRange(GL_UNIFORM_BUFFER, GLNVG_FRAG_BINDING, gl->fragBuf, uniformOffset, sizeof(GLNVGfragUniforms));
 #else
+    glnvg__checkError(gl, "before uniform", __LINE__);
 	GLNVGfragUniforms* frag = nvg__fragUniformPtr(gl, uniformOffset);
 	glUniform4fv(gl->shader.loc[GLNVG_LOC_FRAG], NANOVG_GL_UNIFORMARRAY_SIZE, &(frag->uniformArray[0][0]));
+    glnvg__checkError(gl, "after uniform", __LINE__);
 #endif
 
 	if (image != 0) {
@@ -1139,12 +1141,14 @@ static void glnvg__renderCancel(void* uptr) {
 
 #if 1 //SORT
 
-struct GLNVGrenderBatch
+struct GLNVGrenderNode
 {
-    int image;
     float bounds[4];
+    struct GLNVGrenderNode *left;
+    struct GLNVGrenderNode *right;
+    struct GLNVGrenderNode *parent;
 };
-typedef struct GLNVGrenderBatch GLNVGrenderBatch;
+typedef struct GLNVGrenderNode GLNVGrenderNode;
 
 static float glnvg__minf(float a, float b) { return a < b ? a : b; }
 static float glnvg__maxf(float a, float b) { return a > b ? a : b; }
@@ -1213,23 +1217,202 @@ void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * s
     }
 }
 
-void glnvg_batchInit(GLNVGrenderBatch *b, int img)
+
+#define GLNVG_MAX_NUMBER_NODES 512
+
+struct GLNVGrenderNodePool
 {
-    b->image = img;
-    b->bounds[0] = b->bounds[1] = 1e6f;
-    b->bounds[2] = b->bounds[3] = -1e6f;
+    GLNVGrenderNode nodePool[GLNVG_MAX_NUMBER_NODES];
+    int numNodes;
+};
+typedef struct GLNVGrenderNodePool GLNVGrenderNodePool;
+
+GLNVGrenderNode* glnvg_nodeInit(GLNVGrenderNodePool *pool, const float * bounds)
+{
+    GLNVGrenderNode * b = 0;
+    
+    if (pool->numNodes <= GLNVG_MAX_NUMBER_NODES)
+    {
+        b = &pool->nodePool[ pool->numNodes++ ];
+    
+        if (bounds)
+        {
+            memcpy(b->bounds, bounds, sizeof(float)*4);
+        }
+        else
+        {
+            b->bounds[0] = b->bounds[1] = 1e6f;
+            b->bounds[2] = b->bounds[3] = -1e6f;
+        }
+        b->left = b->right = b->parent = 0;
+    }
+    
+    return b;
 }
 
-int glnvg_batchIntersects(GLNVGrenderBatch * batch, const float* b)
+#define GLNVG_MAX_NUMBER_CALLS 512
+#define GLNVG_MAX_NUMBER_BATCHES 512//64
+
+struct GLNVGrenderBatch
 {
-    return (b[0] <= batch->bounds[2] && b[2] >= batch->bounds[0]) &&
-    (b[1] <= batch->bounds[3] && b[3] >= batch->bounds[1]) ? 1 : 0;
+    GLNVGrenderNode * root;
+    int image;
+    
+    GLNVGcall * calls[GLNVG_MAX_NUMBER_CALLS];
+    int numCalls;
+};
+typedef struct GLNVGrenderBatch GLNVGrenderBatch;
+
+struct GLNVGrenderBatchPool
+{
+    GLNVGrenderBatch batches[GLNVG_MAX_NUMBER_BATCHES];
+    int numBatches;
+    
+    int map[GLNVG_MAX_NUMBER_BATCHES];
+};
+typedef struct GLNVGrenderBatchPool GLNVGrenderBatchPool;
+
+GLNVGrenderBatch * glnvg_createBatch(GLNVGrenderBatchPool * batch, int img, int insert)
+{
+    GLNVGrenderBatch * b = 0;
+    
+    if (batch->numBatches <= GLNVG_MAX_NUMBER_BATCHES)
+    {
+        int idx = batch->numBatches++;
+        
+        b = &batch->batches[idx];
+        b->root = 0;
+        b->numCalls = 0;
+        b->image = img;
+    
+#if 1//MAP
+        if (insert > idx) insert = idx;
+        
+        for (int i=idx; i>insert; --i)
+            batch->map[i] = batch->map[i-1];
+        
+        batch->map[insert] = idx;
+#else
+        batch->map[idx] = idx;
+#endif
+    }
+    
+    return b;
 }
+
+GLNVGrenderNode * glnvg_intersectNode(GLNVGrenderNode * batch, const float* b)
+{
+    return batch != 0 && (b[0] <= batch->bounds[2] && b[2] >= batch->bounds[0]) &&
+    (b[1] <= batch->bounds[3] && b[3] >= batch->bounds[1]) ? batch : 0;
+}
+
+GLNVGrenderNode * glnvg_intersectNodeRecursive(GLNVGrenderNode * batch, const float* b)
+{
+    GLNVGrenderNode * i = glnvg_intersectNode(batch, b);
+    
+    if ( i != 0 )
+    {
+        if ( batch->left != 0 )
+            i = glnvg_intersectNodeRecursive(batch->left, b);
+        
+        if (i == 0 && batch->right != 0 )
+            i = glnvg_intersectNodeRecursive(batch->right, b);
+    }
+    
+    return i;
+}
+
+GLNVGrenderNode * glnvg_intersectsBatch(const GLNVGrenderBatch * b, const float * bounds)
+{
+    return glnvg_intersectNodeRecursive(b->root, bounds);
+}
+
+void glnvg_combineBounds(const float*a, const float *b, float * result)
+{
+    result[0] = glnvg__minf(a[0], b[0]);
+    result[1] = glnvg__minf(a[1], b[1]);
+    result[2] = glnvg__maxf(a[2], b[2]);
+    result[3] = glnvg__maxf(a[3], b[3]);
+}
+
+GLNVGrenderNode * glnvg_appendNode(GLNVGrenderBatch * b, GLNVGrenderNodePool *pool, const float* bounds)
+{
+    GLNVGrenderNode * node = glnvg_nodeInit(pool, bounds);
+    
+    if (node)
+    {
+        GLNVGrenderNode * i = glnvg_intersectNodeRecursive(b->root, bounds);
+        
+        if (i != 0 && i->parent != 0)
+        {
+            GLNVGrenderNode * old_root = i->parent;
+            
+            float bbox[4];
+            glnvg_combineBounds(bounds, i->bounds, bbox);
+            
+            //expand bounds of parent
+            glnvg_combineBounds(bbox, old_root->bounds, old_root->bounds);
+        
+            //new node
+            GLNVGrenderNode * n = glnvg_nodeInit(pool, bbox);
+            n->parent = old_root;
+            n->left = i;
+            n->right = node;
+            node->parent = n;
+
+            if (old_root->left == i)
+            {
+                old_root->left = n;
+            }
+            else if (old_root->right == i)
+            {
+                old_root->right = n;
+            }
+        }
+        else
+        {
+            GLNVGrenderNode * old_root = b->root;
+            
+            float bbox[4];
+            glnvg_combineBounds(bounds, old_root->bounds, bbox);
+            
+            b->root = glnvg_nodeInit(pool, bbox);
+            old_root->parent = b->root;
+            node->parent = b->root;
+            b->root->left = old_root;
+            b->root->right = node;
+        }
+    }
+    
+    return node;
+}
+
+GLNVGrenderNode * glnvg_addCall(GLNVGrenderBatch * b, GLNVGrenderNodePool *pool, GLNVGcall* call)
+{
+    if (b->numCalls <= GLNVG_MAX_NUMBER_CALLS)
+    {
+        b->calls[ b->numCalls++ ] = call;
+        
+        if (b->numCalls == 1)
+        {
+            b->root = glnvg_nodeInit(pool, call->bounds);
+            return b->root;
+        }
+        else
+        {
+            return glnvg_appendNode(b, pool, call->bounds);
+        }
+    }
+    
+    return 0;
+}
+
 static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
                                    const float* bounds, const NVGvertex* verts, int nverts);
 #include "nanovg.h"
 #endif
 
+#define SORT 1
 
 static void glnvg__renderFlush(void* uptr)
 {
@@ -1238,77 +1421,162 @@ static void glnvg__renderFlush(void* uptr)
 	int i;
     
     
-#if 1 //SORT RENDER CALLS
+#if SORT //SORT RENDER CALLS
+    GLNVGrenderNodePool pool;
+    pool.numNodes = 0;
+    
+    GLNVGrenderBatchPool batches;
+    batches.numBatches = 0;
+    
     static int a = 0;
     if (a == 0)
     {
+        int j;
         a = 1;
         int calls = gl->ncalls;
-    GLNVGrenderBatch batches[256];
-    
-    
-    for (i = 0; i < calls; i++) {
-        GLNVGcall* call = &gl->calls[i];
         
-        const float *bounds = call->bounds;//[4];
-        //glnvg_transformBounds(call->bounds, call->xform, bounds);
-        
-        float x1 = bounds[0];
-        float y1 = bounds[1];
-        float x2 = bounds[2];
-        float y2 = bounds[3];
-        
-        const float l = 2;
-        float w = x2- x1;
-        float h = y2- y1;
-        
-        if (w < 0)
+       
+        for (i = 0; i < gl->ncalls; ++i)
         {
-            float s = x2; x2 = x1; x1 = s;
+            GLNVGcall* call = &gl->calls[i];
+            
+            if (call->bounds[2] - call->bounds[0] > 0 &&
+                call->bounds[3] - call->bounds[1] > 0)
+            {
+                int insert = batches.numBatches;
+                GLNVGrenderBatch * found = 0;
+
+                for (j = batches.numBatches; j > 0; --j)
+                {
+                    int m = batches.map[j-1];
+                    GLNVGrenderBatch * batch = &batches.batches[m];
+                    
+                   if (batch->image == call->image)
+                    {
+                        //add to batch; don't break here yet as there might be
+                        // other batches with same image id (TODO: we could store a image id count
+                        // to break here early)
+                        found = batch;
+                    }
+                    else
+                    {
+                        GLNVGrenderNode * node = glnvg_intersectsBatch(batch, call->bounds);
+                        
+                        //check if intersects with nodes (only leafs)
+                        if (node != 0 && node->left == 0 && node->right == 0)
+                        {
+                            //yes: break and add new batch
+                            insert = j;
+                            break;
+                        }
+                        else
+                        {
+                            //no: continue and see if we can add to existing batch to come.
+                            insert = j+1;
+                        }
+                    }
+                }
+                
+                
+                GLNVGrenderNode * added = 0;
+                
+                if (found)
+                {
+                    added = glnvg_addCall(found, &pool, call);
+                }
+
+                if (added == 0)
+                {
+                    GLNVGrenderBatch * batch = glnvg_createBatch(&batches, call->image, insert);
+                    glnvg_addCall(batch, &pool, call);
+                }
+            }
         }
-        if (h < 0)
+  
+#if 0
+        for (j = 0; j < batches.numBatches; ++j)
         {
-            float s = y2; y2 = y1; y1 = s;
+            int m = batches.map[j];
+            GLNVGrenderBatch * batch = &batches.batches[m];
+            
+            printf("%02d-> %02d img=%d call=%d\n", j, m, batch->image, batch->numCalls);
         }
         
-        const float t[] = { 0, 0, 1, 1 };
-        const float sx = l / w, sy = l / h;
+        int b = 1;
+#endif
         
-        const float iV[] = { x1+l, y1+l, x2-l, y2-l };
-        const float iT[] = { t[0]+sx, t[1]+sy, t[2]-sx, t[3]-sy };
-        
-        NVGvertex verts[] =
+#if 0
+        for (j = 0; j < batches.numBatches; ++j)
         {
-            //top
-            {x1, y1, t[0], t[1]}, {iV[2], iV[1], iT[2], iT[1]}, {x2, y1, t[2], t[1]},
-            {x1, y1, t[0], t[1]}, {iV[0], iV[1], iT[0], iT[1]}, {iV[2], iV[1], iT[2], iT[1]},
-            //right
-            {iV[2], iV[1], iT[2], iT[1]}, {x2, y2, t[2], t[3]}, {x2, y1, t[2], t[1]},
-            {iV[2], iV[1], iT[2], iT[1]}, {iV[2], iV[3], iT[2], iT[3]},	{x2, y2, t[2], t[3]},
-            //bottom
-            {iV[0], iV[3], iT[0], iT[3]}, {x2, y2, t[2], t[3]}, {iV[2], iV[3], iT[2], iT[3]},
-            {iV[0], iV[3], iT[0], iT[3]}, {x1, y2, t[0], t[3]}, {x2, y2, t[2], t[3]},
-            //left
-            {x1, y1, t[0], t[1]}, {iV[0], iV[3], iT[0], iT[3]},	{iV[0], iV[1], iT[0], iT[1]},
-            {x1, y1, t[0], t[1]}, {x1, y2, t[0], t[3]}, {iV[0], iV[3], iT[0], iT[3]}	
-        };
+            int m = batches.map[j];
+            GLNVGrenderBatch * batch = &batches.batches[m];
+            
+            for (i =0; i<batch->numCalls; ++i)
+            {
+                const GLNVGcall* call = batch->calls[i];
+                
+            //for (i = 0; i < calls; i++) {
+                //GLNVGcall* call = &gl->calls[i];
+                
+                const float *bounds = call->bounds;
+                
+                float x1 = bounds[0];
+                float y1 = bounds[1];
+                float x2 = bounds[2];
+                float y2 = bounds[3];
+                
+                const float l = 2;
+                float w = x2- x1;
+                float h = y2- y1;
+                
+                if (w < 0)
+                {
+                    float s = x2; x2 = x1; x1 = s;
+                }
+                if (h < 0)
+                {
+                    float s = y2; y2 = y1; y1 = s;
+                }
+                
+                const float t[] = { 0, 0, 1, 1 };
+                const float sx = l / w, sy = l / h;
+                
+                const float iV[] = { x1+l, y1+l, x2-l, y2-l };
+                const float iT[] = { t[0]+sx, t[1]+sy, t[2]-sx, t[3]-sy };
+                
+                NVGvertex verts[] =
+                {
+                    //top
+                    {x1, y1, t[0], t[1]}, {iV[2], iV[1], iT[2], iT[1]}, {x2, y1, t[2], t[1]},
+                    {x1, y1, t[0], t[1]}, {iV[0], iV[1], iT[0], iT[1]}, {iV[2], iV[1], iT[2], iT[1]},
+                    //right
+                    {iV[2], iV[1], iT[2], iT[1]}, {x2, y2, t[2], t[3]}, {x2, y1, t[2], t[1]},
+                    {iV[2], iV[1], iT[2], iT[1]}, {iV[2], iV[3], iT[2], iT[3]},	{x2, y2, t[2], t[3]},
+                    //bottom
+                    {iV[0], iV[3], iT[0], iT[3]}, {x2, y2, t[2], t[3]}, {iV[2], iV[3], iT[2], iT[3]},
+                    {iV[0], iV[3], iT[0], iT[3]}, {x1, y2, t[0], t[3]}, {x2, y2, t[2], t[3]},
+                    //left
+                    {x1, y1, t[0], t[1]}, {iV[0], iV[3], iT[0], iT[3]},	{iV[0], iV[1], iT[0], iT[1]},
+                    {x1, y1, t[0], t[1]}, {x1, y2, t[0], t[3]}, {iV[0], iV[3], iT[0], iT[3]}	
+                };
 
 
-        NVGpaint paint = {};
-        nvgTransformIdentity(paint.xform);
-        paint.radius = 0.0f;
-        paint.feather = 1.0f;
-        paint.innerColor = nvgRGBAf(1, 0, 0, 0.8);
-        paint.outerColor = nvgRGBAf(1, 0, 0, 0.8);
-        NVGscissor scissor = {};
-        scissor.extent[0] = -1.0f;
-        scissor.extent[1] = -1.0f;
-        
-        glnvg__renderTriangles(uptr, &paint, &scissor,
-                               paint.xform, //identity
-                               //call->xform,
-                               bounds, (NVGvertex*)verts, 6*4);
-    }
+                NVGpaint paint = {};
+                nvgTransformIdentity(paint.xform);
+                paint.radius = 0.0f;
+                paint.feather = 1.0f;
+                paint.innerColor = nvgRGBAf(1, 0, 0, 0.8);
+                paint.outerColor = nvgRGBAf(1, 0, 0, 0.8);
+                NVGscissor scissor = {};
+                scissor.extent[0] = -1.0f;
+                scissor.extent[1] = -1.0f;
+                
+                glnvg__renderTriangles(uptr, &paint, &scissor,
+                                       paint.xform, //identity
+                                       bounds, (NVGvertex*)verts, 6*4);
+            }
+        }
+#endif
         a = 0;
     }
 #endif
@@ -1383,16 +1651,34 @@ static void glnvg__renderFlush(void* uptr)
         glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
 #endif
         
+        
+#if SORT
+    static float animation = 0.0f;
+    animation += 0.015f;
+    int n = batches.numBatches;
+   // n = (((int)animation) % n);
+        
+    for (int j = 0; j < n; ++j)
+    {
+        int m = batches.map[j];
+        GLNVGrenderBatch * batch = &batches.batches[m];
+            
+        for (i =0; i<batch->numCalls; ++i)
+        {
+            GLNVGcall* call = batch->calls[i];
+#else
+        {
 		for (i = 0; i < gl->ncalls; i++) {
-			GLNVGcall* call = &gl->calls[i];
-
+            GLNVGcall* call = &gl->calls[i];
+#endif
+            
 #if NVG_TRANSFORM_IN_VERTEX_SHADER
 			//transpose for matrix form
 			xform[0] = call->xform[0]; xform[1] = call->xform[2]; xform[2] = call->xform[4];
 			xform[3] = call->xform[1]; xform[4] = call->xform[3]; xform[5] = call->xform[5];
 			glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
 #endif
-			
+            
 			if (call->type == GLNVG_FILL)
 				glnvg__fill(gl, call);
 			else if (call->type == GLNVG_CONVEXFILL)
@@ -1401,7 +1687,8 @@ static void glnvg__renderFlush(void* uptr)
 				glnvg__stroke(gl, call);
 			else if (call->type == GLNVG_TRIANGLES)
 				glnvg__triangles(gl, call);
-		}
+        }
+    }
         
 		glDisableVertexAttribArray(0);
 		glDisableVertexAttribArray(1);
@@ -1412,7 +1699,7 @@ static void glnvg__renderFlush(void* uptr)
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 		glUseProgram(0);
 		glnvg__bindTexture(gl, 0, GL_TEXTURE_2D);
-	}
+    }
 
 	// Reset calls
 	gl->nverts = 0;
