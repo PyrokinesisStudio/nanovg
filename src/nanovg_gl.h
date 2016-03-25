@@ -1217,8 +1217,9 @@ void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * s
     }
 }
 
-
-#define GLNVG_MAX_NUMBER_NODES 512
+#define GLNVG_MAX_NUMBER_BATCHES 32
+#define GLNVG_MAX_NUMBER_CALLS 128 //per batch
+#define GLNVG_MAX_NUMBER_NODES GLNVG_MAX_NUMBER_CALLS*GLNVG_MAX_NUMBER_BATCHES*2
 
 struct GLNVGrenderNodePool
 {
@@ -1231,7 +1232,7 @@ GLNVGrenderNode* glnvg_nodeInit(GLNVGrenderNodePool *pool, const float * bounds)
 {
     GLNVGrenderNode * b = 0;
     
-    if (pool->numNodes <= GLNVG_MAX_NUMBER_NODES)
+    if (pool->numNodes < GLNVG_MAX_NUMBER_NODES)
     {
         b = &pool->nodePool[ pool->numNodes++ ];
     
@@ -1249,9 +1250,6 @@ GLNVGrenderNode* glnvg_nodeInit(GLNVGrenderNodePool *pool, const float * bounds)
     
     return b;
 }
-
-#define GLNVG_MAX_NUMBER_CALLS 512
-#define GLNVG_MAX_NUMBER_BATCHES 512//64
 
 struct GLNVGrenderBatch
 {
@@ -1276,7 +1274,7 @@ GLNVGrenderBatch * glnvg_createBatch(GLNVGrenderBatchPool * batch, int img, int 
 {
     GLNVGrenderBatch * b = 0;
     
-    if (batch->numBatches <= GLNVG_MAX_NUMBER_BATCHES)
+    if (batch->numBatches < GLNVG_MAX_NUMBER_BATCHES)
     {
         int idx = batch->numBatches++;
         
@@ -1285,16 +1283,12 @@ GLNVGrenderBatch * glnvg_createBatch(GLNVGrenderBatchPool * batch, int img, int 
         b->numCalls = 0;
         b->image = img;
     
-#if 1//MAP
         if (insert > idx) insert = idx;
         
         for (int i=idx; i>insert; --i)
             batch->map[i] = batch->map[i-1];
         
         batch->map[insert] = idx;
-#else
-        batch->map[idx] = idx;
-#endif
     }
     
     return b;
@@ -1389,7 +1383,7 @@ GLNVGrenderNode * glnvg_appendNode(GLNVGrenderBatch * b, GLNVGrenderNodePool *po
 
 GLNVGrenderNode * glnvg_addCall(GLNVGrenderBatch * b, GLNVGrenderNodePool *pool, GLNVGcall* call)
 {
-    if (b->numCalls <= GLNVG_MAX_NUMBER_CALLS)
+    if (b->numCalls < GLNVG_MAX_NUMBER_CALLS)
     {
         b->calls[ b->numCalls++ ] = call;
         
@@ -1453,10 +1447,40 @@ static void glnvg__renderFlush(void* uptr)
                     
                    if (batch->image == call->image)
                     {
-                        //add to batch; don't break here yet as there might be
-                        // other batches with same image id (TODO: we could store a image id count
-                        // to break here early)
-                        found = batch;
+                        // if first found batch - see if there are potentially others
+                        //   we should cache this info so we don't have to walk the map?!
+                        if (found == 0)
+                        {
+                            found = batch;
+                            
+                            int others = 0;
+                            
+                            for (int k = j-1; k > 0; --k)
+                            {
+                                int m = batches.map[k-1];
+                                GLNVGrenderBatch * batch = &batches.batches[m];
+                                
+                                if (batch->image == call->image &&
+                                    batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
+                                {
+                                    ++others;
+                                    break;
+                                }
+                            }
+                            
+                            if (others == 0)
+                                break;
+                        }
+                        else
+                        {
+                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
+                                found = batch;
+                        }
+                        
+                        
+                        //if we already intesect with this batch break!
+                        if (glnvg_intersectsBatch(batch, call->bounds) != 0)
+                            break;
                     }
                     else
                     {
@@ -1472,7 +1496,7 @@ static void glnvg__renderFlush(void* uptr)
                         else
                         {
                             //no: continue and see if we can add to existing batch to come.
-                            insert = j+1;
+                            insert = j + 1;
                         }
                     }
                 }
@@ -1488,12 +1512,13 @@ static void glnvg__renderFlush(void* uptr)
                 if (added == 0)
                 {
                     GLNVGrenderBatch * batch = glnvg_createBatch(&batches, call->image, insert);
-                    glnvg_addCall(batch, &pool, call);
+                    if (batch) glnvg_addCall(batch, &pool, call);
+                    else break; //TODO: handle case (flush current bvh and resume)
                 }
             }
         }
   
-#if 0
+#if 1
         for (j = 0; j < batches.numBatches; ++j)
         {
             int m = batches.map[j];
@@ -1656,7 +1681,7 @@ static void glnvg__renderFlush(void* uptr)
     static float animation = 0.0f;
     animation += 0.015f;
     int n = batches.numBatches;
-   // n = (((int)animation) % n);
+    //n = (((int)animation) % n);
         
     for (int j = 0; j < n; ++j)
     {
