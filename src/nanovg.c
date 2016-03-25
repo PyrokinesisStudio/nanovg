@@ -1220,7 +1220,10 @@ void nvgStrokePaint(NVGcontext* ctx, NVGpaint paint)
 {
 	NVGstate* state = nvg__getState(ctx);
 	state->stroke = paint;
+    
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER
 	nvgTransformMultiply(state->stroke.xform, state->xform);
+#endif
 }
 
 void nvgFillColor(NVGcontext* ctx, NVGcolor color)
@@ -1233,7 +1236,10 @@ void nvgFillPaint(NVGcontext* ctx, NVGpaint paint)
 {
 	NVGstate* state = nvg__getState(ctx);
 	state->fill = paint;
+    
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER
 	nvgTransformMultiply(state->fill.xform, state->xform);
+#endif
 }
 
 int nvgCreateImage(NVGcontext* ctx, const char* filename, int imageFlags)
@@ -2780,9 +2786,8 @@ void nvgFill(NVGcontext* ctx)
 #if	!NVG_TRANSFORM_IN_VERTEX_SHADER
 	xform = NVGidentityXform;
 #else
-	//scissor and paint need to be inverse transformed.
+	//scissor needs to be inverse transformed.
 	nvgTransformMultiply(scissor.xform, invxform);
-	nvgTransformMultiply(fillPaint.xform, invxform);
 #endif
 
 	ctx->renderFill(ctx, &fillPaint, &scissor, xform, fringeWidth,
@@ -2844,9 +2849,8 @@ void nvgStroke(NVGcontext* ctx)
 #if	!NVG_TRANSFORM_IN_VERTEX_SHADER
 	xform = NVGidentityXform;
 #else
-	//scissor and paint need to be inverse transformed.
+	//scissor needs to be inverse transformed.
 	nvgTransformMultiply(scissor.xform, invxform);
-	nvgTransformMultiply(strokePaint.xform, invxform);
 #endif
     
     float edge = strokeWidth*0.75f; //TODO(DSG): smarter
@@ -2890,10 +2894,10 @@ static void nvg__renderTrianglesSimple(NVGcontext* ctx, const float* bounds,
 #if	!NVG_TRANSFORM_IN_VERTEX_SHADER
 	xform = NVGidentityXform;
 #else
-	//scissor and paint need to be inverse transformed.
+	//scissor needs to be inverse transformed.
 	nvgTransformMultiply(scissor.xform, invxform);
-	nvgTransformMultiply(paint.xform, invxform);
 #endif
+    
 	ctx->renderTriangles(ctx, &paint, &scissor, xform, bounds, verts, nverts);
 
 #if DEBUG
@@ -3135,9 +3139,8 @@ static void nvg__renderText(NVGcontext* ctx, const float* bounds, NVGvertex* ver
 #if	!NVG_TRANSFORM_IN_VERTEX_SHADER
 	xform = NVGidentityXform;
 #else
-	//scissor and paint need to be inverse transformed.
+	//scissor needs to be inverse transformed.
 	nvgTransformMultiply(scissor.xform, invxform);
-	nvgTransformMultiply(paint.xform, invxform);
 #endif
 
 	ctx->renderTriangles(ctx, &paint, &scissor, xform, bounds, verts, nverts);

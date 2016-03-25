@@ -1217,7 +1217,7 @@ void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * s
     }
 }
 
-#define GLNVG_MAX_NUMBER_BATCHES 32
+#define GLNVG_MAX_NUMBER_BATCHES 128 //TODO: less batches and flush if full
 #define GLNVG_MAX_NUMBER_CALLS 128 //per batch
 #define GLNVG_MAX_NUMBER_NODES GLNVG_MAX_NUMBER_CALLS*GLNVG_MAX_NUMBER_BATCHES*2
 
@@ -1306,10 +1306,9 @@ GLNVGrenderNode * glnvg_intersectNodeRecursive(GLNVGrenderNode * batch, const fl
     
     if ( i != 0 )
     {
-        if ( batch->left != 0 )
-            i = glnvg_intersectNodeRecursive(batch->left, b);
+        i = glnvg_intersectNodeRecursive(batch->left, b);
         
-        if (i == 0 && batch->right != 0 )
+        if (i == 0)
             i = glnvg_intersectNodeRecursive(batch->right, b);
     }
     
@@ -1446,13 +1445,16 @@ static void glnvg__renderFlush(void* uptr)
                     GLNVGrenderBatch * batch = &batches.batches[m];
                     
                    if (batch->image == call->image)
-                    {
+                   {
                         // if first found batch - see if there are potentially others
                         //   we should cache this info so we don't have to walk the map?!
                         if (found == 0)
                         {
-                            found = batch;
-                            
+                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)                            
+                                found = batch;
+                            else
+                                insert = j;
+
                             int others = 0;
                             
                             for (int k = j-1; k > 0; --k)
@@ -1476,7 +1478,6 @@ static void glnvg__renderFlush(void* uptr)
                             if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
                                 found = batch;
                         }
-                        
                         
                         //if we already intesect with this batch break!
                         if (glnvg_intersectsBatch(batch, call->bounds) != 0)
@@ -1507,13 +1508,14 @@ static void glnvg__renderFlush(void* uptr)
                 if (found)
                 {
                     added = glnvg_addCall(found, &pool, call);
+                    insert = batches.numBatches; //TODO: if added fails ... where do we add?
                 }
 
                 if (added == 0)
                 {
                     GLNVGrenderBatch * batch = glnvg_createBatch(&batches, call->image, insert);
-                    if (batch) glnvg_addCall(batch, &pool, call);
-                    else break; //TODO: handle case (flush current bvh and resume)
+                    if (batch) added = glnvg_addCall(batch, &pool, call);
+                    //else break; //TODO: handle case (flush current bvh and resume)
                 }
             }
         }
