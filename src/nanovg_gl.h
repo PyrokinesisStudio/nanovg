@@ -993,10 +993,8 @@ static void glnvg__setUniforms(GLNVGcontext* gl, int uniformOffset, int image)
 #if NANOVG_GL_USE_UNIFORMBUFFER
 	glBindBufferRange(GL_UNIFORM_BUFFER, GLNVG_FRAG_BINDING, gl->fragBuf, uniformOffset, sizeof(GLNVGfragUniforms));
 #else
-    glnvg__checkError(gl, "before uniform", __LINE__);
-	GLNVGfragUniforms* frag = nvg__fragUniformPtr(gl, uniformOffset);
+    GLNVGfragUniforms* frag = nvg__fragUniformPtr(gl, uniformOffset);
 	glUniform4fv(gl->shader.loc[GLNVG_LOC_FRAG], NANOVG_GL_UNIFORMARRAY_SIZE, &(frag->uniformArray[0][0]));
-    glnvg__checkError(gl, "after uniform", __LINE__);
 #endif
 
 	if (image != 0) {
@@ -1256,7 +1254,7 @@ struct GLNVGrenderBatch
     GLNVGrenderNode * root;
     int image;
     
-    GLNVGcall * calls[GLNVG_MAX_NUMBER_CALLS];
+    GLNVGcall * calls[GLNVG_MAX_NUMBER_CALLS]; //TODO: we could use an intrusive list instead
     int numCalls;
 };
 typedef struct GLNVGrenderBatch GLNVGrenderBatch;
@@ -1296,15 +1294,15 @@ GLNVGrenderBatch * glnvg_createBatch(GLNVGrenderBatchPool * batch, int img, int 
 
 GLNVGrenderNode * glnvg_intersectNode(GLNVGrenderNode * batch, const float* b)
 {
-    return batch != 0 && (b[0] <= batch->bounds[2] && b[2] >= batch->bounds[0]) &&
-    (b[1] <= batch->bounds[3] && b[3] >= batch->bounds[1]) ? batch : 0;
+    return (batch != 0 && (b[0] <= batch->bounds[2] && b[2] >= batch->bounds[0]) &&
+    (b[1] <= batch->bounds[3] && b[3] >= batch->bounds[1])) ? batch : 0;
 }
 
 GLNVGrenderNode * glnvg_intersectNodeRecursive(GLNVGrenderNode * batch, const float* b)
 {
     GLNVGrenderNode * i = glnvg_intersectNode(batch, b);
     
-    if ( i != 0 )
+    if ( i != 0 && batch->left ) // || batch->right) )
     {
         i = glnvg_intersectNodeRecursive(batch->left, b);
         
@@ -1328,38 +1326,57 @@ void glnvg_combineBounds(const float*a, const float *b, float * result)
     result[3] = glnvg__maxf(a[3], b[3]);
 }
 
+GLNVGrenderNode * glnvg_expandNodeRecursive(GLNVGrenderNode * batch, const float* b)
+{
+    GLNVGrenderNode * i = glnvg_intersectNode(batch, b);
+    
+    if ( i != 0 && batch->left ) // || batch->right))
+    {
+        glnvg_combineBounds(b, i->bounds, i->bounds); //not for leaf nodes!
+        
+        i = glnvg_expandNodeRecursive(batch->left, b);
+        
+        if (i == 0)
+            i = glnvg_expandNodeRecursive(batch->right, b);
+    }
+    
+    return i;
+}
+
 GLNVGrenderNode * glnvg_appendNode(GLNVGrenderBatch * b, GLNVGrenderNodePool *pool, const float* bounds)
 {
     GLNVGrenderNode * node = glnvg_nodeInit(pool, bounds);
     
     if (node)
     {
-        GLNVGrenderNode * i = glnvg_intersectNodeRecursive(b->root, bounds);
+        GLNVGrenderNode * intersect = glnvg_expandNodeRecursive(b->root, bounds);
         
-        if (i != 0 && i->parent != 0)
+        if (intersect != 0 && intersect->parent != 0)
         {
-            GLNVGrenderNode * old_root = i->parent;
+            GLNVGrenderNode * old_root = intersect->parent;
             
             float bbox[4];
-            glnvg_combineBounds(bounds, i->bounds, bbox);
+            glnvg_combineBounds(bounds, intersect->bounds, bbox);
             
-            //expand bounds of parent
-            glnvg_combineBounds(bbox, old_root->bounds, old_root->bounds);
-        
-            //new node
             GLNVGrenderNode * n = glnvg_nodeInit(pool, bbox);
-            n->parent = old_root;
-            n->left = i;
-            n->right = node;
-            node->parent = n;
-
-            if (old_root->left == i)
+            if (n)
             {
-                old_root->left = n;
-            }
-            else if (old_root->right == i)
-            {
-                old_root->right = n;
+                n->parent = old_root;
+                
+                n->left = intersect;
+                intersect->parent = n;
+                
+                n->right = node;
+                node->parent = n;
+                
+                if (old_root->left == intersect)
+                {
+                    old_root->left = n;
+                }
+                else if (old_root->right == intersect)
+                {
+                    old_root->right = n;
+                }
             }
         }
         else
@@ -1426,8 +1443,6 @@ static void glnvg__renderFlush(void* uptr)
     {
         int j;
         a = 1;
-        int calls = gl->ncalls;
-        
        
         for (i = 0; i < gl->ncalls; ++i)
         {
@@ -1450,7 +1465,7 @@ static void glnvg__renderFlush(void* uptr)
                         //   we should cache this info so we don't have to walk the map?!
                         if (found == 0)
                         {
-                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)                            
+                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS-1)
                                 found = batch;
                             else
                                 insert = j;
@@ -1463,7 +1478,7 @@ static void glnvg__renderFlush(void* uptr)
                                 GLNVGrenderBatch * batch = &batches.batches[m];
                                 
                                 if (batch->image == call->image &&
-                                    batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
+                                    batch->numCalls < GLNVG_MAX_NUMBER_CALLS-1)
                                 {
                                     ++others;
                                     break;
@@ -1475,7 +1490,7 @@ static void glnvg__renderFlush(void* uptr)
                         }
                         else
                         {
-                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
+                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS-1)
                                 found = batch;
                         }
                         
@@ -1528,8 +1543,6 @@ static void glnvg__renderFlush(void* uptr)
             
             printf("%02d-> %02d img=%d call=%d\n", j, m, batch->image, batch->numCalls);
         }
-        
-        int b = 1;
 #endif
         
 #if 0
