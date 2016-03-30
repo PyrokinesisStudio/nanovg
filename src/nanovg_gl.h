@@ -1252,15 +1252,14 @@ static void glnvg__renderEnd(GLNVGcontext* gl)
 }
 
 
-#define SORT 0
-
+//#define SORT 1
 #if SORT
 
 typedef GLNVGcall GLNVGbatchedCall;
 
 struct GLNVGrenderNode
 {
-    float bounds[4];
+    float bounds[4]; //TODO: SIMD for bounds checks or integer bounds?
     struct GLNVGrenderNode *left;
     struct GLNVGrenderNode *right;
     struct GLNVGrenderNode *parent;
@@ -1648,7 +1647,7 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
                     GLNVGrenderNode * node = glnvg_intersectsBatch(batch, call->bounds);
                     
                     //check if intersects with nodes (only leafs)
-                    if (node != 0 && node->left == 0 && node->right == 0)
+                    if (node != 0 && node->left == 0)// && node->right == 0)
                     {
                         //yes: break and add new batch
                         insert = j;
@@ -1667,14 +1666,14 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
             if (found)
             {
                 added = glnvg_addCall(found, &pool, call);
-                insert = batches.numBatches; //TODO: if added fails ... where do we add?
+                insert = batches.numBatches; //TODO: if adding fails ... where do we add?
             }
             
             if (added == 0)
             {
                 GLNVGrenderBatch * batch = glnvg_createBatch(&batches, call->image, insert);
                 
-                if (batch == 0) //flush everything
+                if (batch == 0) //flush everything collected so far and try again
                 {
                     glnvg__renderBatch(gl, &batches);
                     pool.numNodes = 0;
