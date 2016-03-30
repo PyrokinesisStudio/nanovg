@@ -1137,7 +1137,124 @@ static void glnvg__renderCancel(void* uptr) {
 	gl->nuniforms = 0;
 }
 
-#if 1 //SORT
+static void glnvg__renderBegin(GLNVGcontext* gl)
+{
+    if (gl->ncalls > 0) {
+        float xform[9];
+        
+        // Setup require GL state.
+        glUseProgram(gl->shader.prog);
+        
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+        glEnable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glStencilMask(0xffffffff);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilFunc(GL_ALWAYS, 0, 0xffffffff);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        
+        
+#if NANOVG_GL3
+        //glEnable(GL_TEXTURE_RECTANGLE);
+        glBindTexture(GL_TEXTURE_RECTANGLE,0);
+#endif
+        
+        
+#if NANOVG_GL_USE_STATE_FILTER
+        gl->boundTexture = 0;
+        gl->stencilMask = 0xffffffff;
+        gl->stencilFunc = GL_ALWAYS;
+        gl->stencilFuncRef = 0;
+        gl->stencilFuncMask = 0xffffffff;
+#endif
+        
+#if NANOVG_GL_USE_UNIFORMBUFFER
+        // Upload ubo for frag shaders
+        glBindBuffer(GL_UNIFORM_BUFFER, gl->fragBuf);
+        glBufferData(GL_UNIFORM_BUFFER, gl->nuniforms * gl->fragSize, gl->uniforms, GL_STREAM_DRAW);
+#endif
+        
+        // Upload vertex data
+#if defined NANOVG_GL3
+        glBindVertexArray(gl->vertArr);
+#endif
+        glBindBuffer(GL_ARRAY_BUFFER, gl->vertBuf);
+        glBufferData(GL_ARRAY_BUFFER, gl->nverts * sizeof(NVGvertex), gl->verts, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(NVGvertex), (const GLvoid*)(size_t)0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(NVGvertex), (const GLvoid*)(0 + 2*sizeof(float)));
+        
+        // Set view and texture just once per frame.
+        glUniform1i(gl->shader.loc[GLNVG_LOC_TEX], 0);
+#if defined NANOVG_GL3
+        glUniform1i(gl->shader.loc[GLNVG_LOC_TEXRECT], 1);
+#endif
+        
+        xform[6] = 2.0f/gl->view[0];
+        xform[7] = 2.0f/gl->view[1];
+        xform[8] = 1.0f;
+        
+#if NANOVG_GL_USE_UNIFORMBUFFER
+        glBindBuffer(GL_UNIFORM_BUFFER, gl->fragBuf);
+#endif
+        
+#if !NVG_TRANSFORM_IN_VERTEX_SHADER //just set once
+        glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
+#endif
+    }
+}
+
+static void glnvg__renderCall(GLNVGcontext * gl, GLNVGcall * call, float * xform)
+{
+#if NVG_TRANSFORM_IN_VERTEX_SHADER
+    //transpose for matrix form
+    xform[0] = call->xform[0]; xform[1] = call->xform[2]; xform[2] = call->xform[4];
+    xform[3] = call->xform[1]; xform[4] = call->xform[3]; xform[5] = call->xform[5];
+    glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
+#endif
+    
+    if (call->type == GLNVG_FILL)
+        glnvg__fill(gl, call);
+    else if (call->type == GLNVG_CONVEXFILL)
+        glnvg__convexFill(gl, call);
+    else if (call->type == GLNVG_STROKE)
+        glnvg__stroke(gl, call);
+    else if (call->type == GLNVG_TRIANGLES)
+        glnvg__triangles(gl, call);
+}
+
+static void glnvg__renderEnd(GLNVGcontext* gl)
+{
+    if (gl->ncalls > 0) {
+        glDisableVertexAttribArray(0);
+        glDisableVertexAttribArray(1);
+#if defined NANOVG_GL3
+        glBindVertexArray(0);
+#endif
+        glDisable(GL_CULL_FACE);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+        glnvg__bindTexture(gl, 0, GL_TEXTURE_2D);
+    }
+    
+    // Reset calls
+    gl->nverts = 0;
+    gl->npaths = 0;
+    gl->ncalls = 0;
+    gl->nuniforms = 0;
+}
+
+
+#define SORT 0
+
+#if SORT
 
 typedef GLNVGcall GLNVGbatchedCall;
 
@@ -1425,129 +1542,6 @@ int glnvg_shouldAddCallToBatch(const GLNVGbatchedCall* call, const GLNVGrenderBa
     return (call->image == batch->image) ? 1 : 0;
 }
 
-static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
-                                   const float* bounds, const NVGvertex* verts, int nverts);
-#include "nanovg.h"
-#endif
-
-#define SORT 1
-
-static void glnvg__renderBegin(GLNVGcontext* gl)
-{
-    if (gl->ncalls > 0) {
-        float xform[9];
-        
-        // Setup require GL state.
-        glUseProgram(gl->shader.prog);
-        
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-        glEnable(GL_BLEND);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_SCISSOR_TEST);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glStencilMask(0xffffffff);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_ALWAYS, 0, 0xffffffff);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        
-        
-#if NANOVG_GL3
-        //glEnable(GL_TEXTURE_RECTANGLE);
-        glBindTexture(GL_TEXTURE_RECTANGLE,0);
-#endif
-        
-        
-#if NANOVG_GL_USE_STATE_FILTER
-        gl->boundTexture = 0;
-        gl->stencilMask = 0xffffffff;
-        gl->stencilFunc = GL_ALWAYS;
-        gl->stencilFuncRef = 0;
-        gl->stencilFuncMask = 0xffffffff;
-#endif
-        
-#if NANOVG_GL_USE_UNIFORMBUFFER
-        // Upload ubo for frag shaders
-        glBindBuffer(GL_UNIFORM_BUFFER, gl->fragBuf);
-        glBufferData(GL_UNIFORM_BUFFER, gl->nuniforms * gl->fragSize, gl->uniforms, GL_STREAM_DRAW);
-#endif
-        
-        // Upload vertex data
-#if defined NANOVG_GL3
-        glBindVertexArray(gl->vertArr);
-#endif
-        glBindBuffer(GL_ARRAY_BUFFER, gl->vertBuf);
-        glBufferData(GL_ARRAY_BUFFER, gl->nverts * sizeof(NVGvertex), gl->verts, GL_STREAM_DRAW);
-        glEnableVertexAttribArray(0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(NVGvertex), (const GLvoid*)(size_t)0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(NVGvertex), (const GLvoid*)(0 + 2*sizeof(float)));
-        
-        // Set view and texture just once per frame.
-        glUniform1i(gl->shader.loc[GLNVG_LOC_TEX], 0);
-#if defined NANOVG_GL3
-        glUniform1i(gl->shader.loc[GLNVG_LOC_TEXRECT], 1);
-#endif
-        
-        xform[6] = 2.0f/gl->view[0];
-        xform[7] = 2.0f/gl->view[1]; 
-        xform[8] = 1.0f;
-        
-#if NANOVG_GL_USE_UNIFORMBUFFER
-        glBindBuffer(GL_UNIFORM_BUFFER, gl->fragBuf);
-#endif
-        
-#if !NVG_TRANSFORM_IN_VERTEX_SHADER //just set once
-        glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
-#endif
-    }
-}
-
-static void glnvg__renderCall(GLNVGcontext * gl, GLNVGcall * call, float * xform)
-{
-#if NVG_TRANSFORM_IN_VERTEX_SHADER
-    //transpose for matrix form
-    xform[0] = call->xform[0]; xform[1] = call->xform[2]; xform[2] = call->xform[4];
-    xform[3] = call->xform[1]; xform[4] = call->xform[3]; xform[5] = call->xform[5];
-    glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
-#endif
-    
-    if (call->type == GLNVG_FILL)
-        glnvg__fill(gl, call);
-    else if (call->type == GLNVG_CONVEXFILL)
-        glnvg__convexFill(gl, call);
-    else if (call->type == GLNVG_STROKE)
-        glnvg__stroke(gl, call);
-    else if (call->type == GLNVG_TRIANGLES)
-        glnvg__triangles(gl, call);
-}
-
-static void glnvg__renderEnd(GLNVGcontext* gl)
-{
-    if (gl->ncalls > 0) {
-        glDisableVertexAttribArray(0);
-        glDisableVertexAttribArray(1);
-    #if defined NANOVG_GL3
-        glBindVertexArray(0);
-    #endif
-        glDisable(GL_CULL_FACE);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glUseProgram(0);
-        glnvg__bindTexture(gl, 0, GL_TEXTURE_2D);
-    }
-
-    // Reset calls
-    gl->nverts = 0;
-    gl->npaths = 0;
-    gl->ncalls = 0;
-    gl->nuniforms = 0;
-}
-
-
-
 static void glnvg__renderBatch(GLNVGcontext* gl, GLNVGrenderBatchPool* batches)
 {
     int i;
@@ -1585,204 +1579,122 @@ static void glnvg__renderBatch(GLNVGcontext* gl, GLNVGrenderBatchPool* batches)
     batches->numBatches = 0;
 }
 
-
 static void glnvg__renderFlushBatched(GLNVGcontext* gl)
 {
     glnvg__renderBegin(gl);
 
-    
-#if SORT //SORT RENDER CALLS
     GLNVGrenderNodePool pool;
     pool.numNodes = 0;
     
     GLNVGrenderBatchPool batches;
     batches.numBatches = 0;
     
-    static int a = 0;
-    if (a == 0)
+    int j,i;
+    for (i = 0; i < gl->ncalls; ++i)
     {
-        int j,i;
-        a = 1;
+        GLNVGcall* call = &gl->calls[i];
         
-        for (i = 0; i < gl->ncalls; ++i)
+        if (call->bounds[2] - call->bounds[0] > 0 &&
+            call->bounds[3] - call->bounds[1] > 0)
         {
-            GLNVGcall* call = &gl->calls[i];
+            int insert = batches.numBatches;
+            GLNVGrenderBatch * found = 0;
             
-            if (call->bounds[2] - call->bounds[0] > 0 &&
-                call->bounds[3] - call->bounds[1] > 0)
+            for (j = batches.numBatches; j > 0; --j)
             {
-                int insert = batches.numBatches;
-                GLNVGrenderBatch * found = 0;
+                int m = batches.map[j-1];
+                GLNVGrenderBatch * batch = &batches.batches[m];
                 
-                for (j = batches.numBatches; j > 0; --j)
+                if (glnvg_shouldAddCallToBatch(call, batch) != 0)
                 {
-                    int m = batches.map[j-1];
-                    GLNVGrenderBatch * batch = &batches.batches[m];
-                    
-                    if (glnvg_shouldAddCallToBatch(call, batch) != 0)
+                    // if first found batch - see if there are potentially others
+                    if (found == 0)
                     {
-                        // if first found batch - see if there are potentially others
-                        if (found == 0)
-                        {
-                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
-                                found = batch;
-                            else
-                                insert = j;
-                            
-                            int others = 0;
-                            
-                            for (int k = j-1; k > 0; --k)
-                            {
-                                int m = batches.map[k-1];
-                                GLNVGrenderBatch * batch = &batches.batches[m];
-                                
-                                if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS &&
-                                    glnvg_shouldAddCallToBatch(call, batch) != 0)
-                                {
-                                    ++others;
-                                    break;
-                                }
-                            }
-                            
-                            if (others == 0)
-                                break;
-                        }
+                        if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
+                            found = batch;
                         else
+                            insert = j;
+                        
+                        int others = 0;
+                        
+                        for (int k = j-1; k > 0; --k)
                         {
-                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
-                                found = batch;
+                            int m = batches.map[k-1];
+                            GLNVGrenderBatch * batch = &batches.batches[m];
+                            
+                            if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS &&
+                                glnvg_shouldAddCallToBatch(call, batch) != 0)
+                            {
+                                ++others;
+                                break;
+                            }
                         }
                         
-                        //if we already intesect with this batch break!
-                        if (glnvg_intersectsBatch(batch, call->bounds) != 0)
+                        if (others == 0)
                             break;
                     }
                     else
                     {
-                        GLNVGrenderNode * node = glnvg_intersectsBatch(batch, call->bounds);
-                        
-                        //check if intersects with nodes (only leafs)
-                        if (node != 0 && node->left == 0 && node->right == 0)
-                        {
-                            //yes: break and add new batch
-                            insert = j;
-                            break;
-                        }
-                        else
-                        {
-                            //no: continue and see if we can add to existing batch to come.
-                            insert = j + 1;
-                        }
-                    }
-                }
-                
-                GLNVGrenderNode * added = 0;
-                
-                if (found)
-                {
-                    added = glnvg_addCall(found, &pool, call);
-                    insert = batches.numBatches; //TODO: if added fails ... where do we add?
-                }
-                
-                if (added == 0)
-                {
-                    GLNVGrenderBatch * batch = glnvg_createBatch(&batches, call->image, insert);
-                    
-                    if (batch == 0) //flush everything
-                    {
-                        glnvg__renderBatch(gl, &batches);
-                        pool.numNodes = 0;
-                        
-                        batch = glnvg_createBatch(&batches, call->image, insert);
+                        if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
+                            found = batch;
                     }
                     
-                    if (batch)
+                    //if we already intesect with this batch break!
+                    if (glnvg_intersectsBatch(batch, call->bounds) != 0)
+                        break;
+                }
+                else
+                {
+                    GLNVGrenderNode * node = glnvg_intersectsBatch(batch, call->bounds);
+                    
+                    //check if intersects with nodes (only leafs)
+                    if (node != 0 && node->left == 0 && node->right == 0)
                     {
-                        added = glnvg_addCall(batch, &pool, call);
+                        //yes: break and add new batch
+                        insert = j;
+                        break;
+                    }
+                    else
+                    {
+                        //no: continue and see if we can add to existing batch to come.
+                        insert = j + 1;
                     }
                 }
             }
-        }
-        
-#if DEBUG_BBOX_RENDERING
-        for (j = 0; j < batches.numBatches; ++j)
-        {
-            int m = batches.map[j];
-            GLNVGrenderBatch * batch = &batches.batches[m];
             
-            for (i =0; i<batch->numCalls; ++i)
+            GLNVGrenderNode * added = 0;
+            
+            if (found)
             {
-                const GLNVGcall* call = batch->calls[i];
+                added = glnvg_addCall(found, &pool, call);
+                insert = batches.numBatches; //TODO: if added fails ... where do we add?
+            }
+            
+            if (added == 0)
+            {
+                GLNVGrenderBatch * batch = glnvg_createBatch(&batches, call->image, insert);
                 
-                //for (i = 0; i < calls; i++) {
-                //GLNVGcall* call = &gl->calls[i];
-                
-                const float *bounds = call->bounds;
-                
-                float x1 = bounds[0];
-                float y1 = bounds[1];
-                float x2 = bounds[2];
-                float y2 = bounds[3];
-                
-                const float l = 2;
-                float w = x2- x1;
-                float h = y2- y1;
-                
-                if (w < 0)
+                if (batch == 0) //flush everything
                 {
-                    float s = x2; x2 = x1; x1 = s;
-                }
-                if (h < 0)
-                {
-                    float s = y2; y2 = y1; y1 = s;
+                    glnvg__renderBatch(gl, &batches);
+                    pool.numNodes = 0;
+                    
+                    batch = glnvg_createBatch(&batches, call->image, insert);
                 }
                 
-                const float t[] = { 0, 0, 1, 1 };
-                const float sx = l / w, sy = l / h;
-                
-                const float iV[] = { x1+l, y1+l, x2-l, y2-l };
-                const float iT[] = { t[0]+sx, t[1]+sy, t[2]-sx, t[3]-sy };
-                
-                NVGvertex verts[] =
+                if (batch)
                 {
-                    //top
-                    {x1, y1, t[0], t[1]}, {iV[2], iV[1], iT[2], iT[1]}, {x2, y1, t[2], t[1]},
-                    {x1, y1, t[0], t[1]}, {iV[0], iV[1], iT[0], iT[1]}, {iV[2], iV[1], iT[2], iT[1]},
-                    //right
-                    {iV[2], iV[1], iT[2], iT[1]}, {x2, y2, t[2], t[3]}, {x2, y1, t[2], t[1]},
-                    {iV[2], iV[1], iT[2], iT[1]}, {iV[2], iV[3], iT[2], iT[3]},	{x2, y2, t[2], t[3]},
-                    //bottom
-                    {iV[0], iV[3], iT[0], iT[3]}, {x2, y2, t[2], t[3]}, {iV[2], iV[3], iT[2], iT[3]},
-                    {iV[0], iV[3], iT[0], iT[3]}, {x1, y2, t[0], t[3]}, {x2, y2, t[2], t[3]},
-                    //left
-                    {x1, y1, t[0], t[1]}, {iV[0], iV[3], iT[0], iT[3]},	{iV[0], iV[1], iT[0], iT[1]},
-                    {x1, y1, t[0], t[1]}, {x1, y2, t[0], t[3]}, {iV[0], iV[3], iT[0], iT[3]}
-                };
-                
-                
-                NVGpaint paint = {};
-                nvgTransformIdentity(paint.xform);
-                paint.radius = 0.0f;
-                paint.feather = 1.0f;
-                paint.innerColor = nvgRGBAf(1, 0, 0, 0.8);
-                paint.outerColor = nvgRGBAf(1, 0, 0, 0.8);
-                NVGscissor scissor = {};
-                scissor.extent[0] = -1.0f;
-                scissor.extent[1] = -1.0f;
-                
-                glnvg__renderTriangles(uptr, &paint, &scissor,
-                                       paint.xform, //identity
-                                       bounds, (NVGvertex*)verts, 6*4);
+                    added = glnvg_addCall(batch, &pool, call);
+                }
             }
         }
-#endif
-        a = 0;
     }
-#endif
-    
+        
     glnvg__renderBatch(gl, &batches);
     glnvg__renderEnd(gl);
 }
+
+#endif
 
 
 static void glnvg__renderFlush(void* uptr)
@@ -1917,8 +1829,9 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
+#if SORT
     glnvg_worldBounds(bounds, xform, scissor, call->bounds);
-    
+#endif
 
 	if (npaths == 1 && paths[0].convex)
 		call->type = GLNVG_CONVEXFILL;
@@ -2000,8 +1913,10 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
+#if SORT
     glnvg_worldBounds(bounds, xform, scissor, call->bounds);
-
+#endif
+    
 	// Allocate vertices for all the paths.
 	maxverts = glnvg__maxVertCount(paths, npaths);
 	offset = glnvg__allocVerts(gl, maxverts);
@@ -2055,7 +1970,9 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scis
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
+#if SORT
     glnvg_worldBounds(bounds, xform, scissor, call->bounds);
+#endif
     
 	// Allocate vertices for all the paths.
 	call->triangleOffset = glnvg__allocVerts(gl, nverts);
