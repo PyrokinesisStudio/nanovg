@@ -1252,8 +1252,8 @@ static void glnvg__renderEnd(GLNVGcontext* gl)
 }
 
 
-//#define SORT 1
-#if SORT
+#define BATCH_RENDER_CALLS 1
+#if BATCH_RENDER_CALLS
 
 typedef GLNVGcall GLNVGbatchedCall;
 
@@ -1262,7 +1262,6 @@ struct GLNVGrenderNode
     float bounds[4]; //TODO: SIMD for bounds checks or integer bounds?
     struct GLNVGrenderNode *left;
     struct GLNVGrenderNode *right;
-    struct GLNVGrenderNode *parent;
 };
 typedef struct GLNVGrenderNode GLNVGrenderNode;
 
@@ -1297,7 +1296,7 @@ static void glnvg__scissorRect(const NVGscissor * scissor, const float * tx, flo
     rect[3] = rect[1] + tey*2;
 }
 
-void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * scissor, float * result)
+void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * scissor, const float * screen, float * result)
 {
     float x, y;
     const float verts[] =
@@ -1322,15 +1321,17 @@ void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * s
         result[3] = glnvg__maxf(result[3], y);
     }
     
+    float clip[4] = { 0.0f, 0.0f, screen[0], screen[1] };
+    
     if (scissor->extent[0] > 0)
     {
-        float clip[4];
         glnvg__scissorRect(scissor, t, clip);
-        result[0] = glnvg__clampf(result[0], clip[0], clip[2]);
-        result[1] = glnvg__clampf(result[1], clip[1], clip[3]);
-        result[2] = glnvg__clampf(result[2], clip[0], clip[2]);
-        result[3] = glnvg__clampf(result[3], clip[1], clip[3]);
     }
+    
+    result[0] = glnvg__clampf(result[0], clip[0], clip[2]);
+    result[1] = glnvg__clampf(result[1], clip[1], clip[3]);
+    result[2] = glnvg__clampf(result[2], clip[0], clip[2]);
+    result[3] = glnvg__clampf(result[3], clip[1], clip[3]);
 }
 
 #define GLNVG_MAX_NUMBER_BATCHES 64
@@ -1361,7 +1362,7 @@ GLNVGrenderNode* glnvg_nodeInit(GLNVGrenderNodePool *pool, const float * bounds)
             b->bounds[0] = b->bounds[1] = 1e6f;
             b->bounds[2] = b->bounds[3] = -1e6f;
         }
-        b->left = b->right = b->parent = 0;
+        b->left = b->right = 0;
     }
     
     return b;
@@ -1372,7 +1373,7 @@ struct GLNVGrenderBatch
     GLNVGrenderNode * root;
     int image;
     
-    GLNVGbatchedCall * calls[GLNVG_MAX_NUMBER_CALLS]; //TODO: we could use an intrusive list instead
+    GLNVGbatchedCall * calls[GLNVG_MAX_NUMBER_CALLS]; //TODO: we could use an intrusive list instead (have to check GLNVG_MAX_NUMBER_NODES when adding calls)
     int numCalls;
 };
 typedef struct GLNVGrenderBatch GLNVGrenderBatch;
@@ -1410,10 +1411,14 @@ GLNVGrenderBatch * glnvg_createBatch(GLNVGrenderBatchPool * batch, int img, int 
     return b;
 }
 
+static int glnvg_intersectBounds(const float* b, const float* a)
+{
+    return (b[0] <= a[2] && b[2] >= a[0]) && (b[1] <= a[3] && b[3] >= a[1]);
+}
+
 GLNVGrenderNode * glnvg_intersectNode(GLNVGrenderNode * batch, const float* b)
 {
-    return (batch != 0 && (b[0] <= batch->bounds[2] && b[2] >= batch->bounds[0]) &&
-    (b[1] <= batch->bounds[3] && b[3] >= batch->bounds[1])) ? batch : 0;
+    return (batch != 0 && glnvg_intersectBounds(batch->bounds, b) != 0) ? batch : 0;
 }
 
 GLNVGrenderNode * glnvg_intersectNodeRecursive(GLNVGrenderNode * batch, const float* b)
@@ -1467,48 +1472,32 @@ GLNVGrenderNode * glnvg_appendNode(GLNVGrenderBatch * b, GLNVGrenderNodePool *po
     
     if (node)
     {
-        GLNVGrenderNode * intersect = glnvg_expandNodeRecursive(b->root, bounds);
+        GLNVGrenderNode * intersecting_node = glnvg_expandNodeRecursive(b->root, bounds);
         
-        if (intersect != 0 && intersect->parent != 0)
+        if (intersecting_node != 0)
         {
-            GLNVGrenderNode * old_root = intersect->parent;
-            
-            float bbox[4];
-            glnvg_combineBounds(bounds, intersect->bounds, bbox);
-            
-            GLNVGrenderNode * n = glnvg_nodeInit(pool, bbox);
-            if (n)
+            GLNVGrenderNode * move_intersecting = glnvg_nodeInit(pool, intersecting_node->bounds);
+            if (move_intersecting)
             {
-                n->parent = old_root;
+                glnvg_combineBounds(bounds, intersecting_node->bounds, intersecting_node->bounds);
                 
-                n->left = intersect;
-                intersect->parent = n;
-                
-                n->right = node;
-                node->parent = n;
-                
-                if (old_root->left == intersect)
-                {
-                    old_root->left = n;
-                }
-                else if (old_root->right == intersect)
-                {
-                    old_root->right = n;
-                }
+                intersecting_node->left = node;
+                intersecting_node->right = move_intersecting;
             }
         }
         else
         {
             GLNVGrenderNode * old_root = b->root;
-            
-            float bbox[4];
-            glnvg_combineBounds(bounds, old_root->bounds, bbox);
-            
-            b->root = glnvg_nodeInit(pool, bbox);
-            old_root->parent = b->root;
-            node->parent = b->root;
-            b->root->left = old_root;
-            b->root->right = node;
+            GLNVGrenderNode * new_root = glnvg_nodeInit(pool, old_root->bounds);
+            if (new_root)
+            {
+                glnvg_combineBounds(bounds, new_root->bounds, new_root->bounds);
+
+                new_root->right = old_root;
+                new_root->left = node;
+                
+                b->root = new_root;
+            }
         }
     }
     
@@ -1551,7 +1540,7 @@ static void glnvg__renderBatch(GLNVGcontext* gl, GLNVGrenderBatchPool* batches)
     for (int j = 0; j < batches->numBatches; ++j)
     {
         int m = batches->map[j];
-        GLNVGrenderBatch * batch = &batches.batches[m];
+        GLNVGrenderBatch * batch = &batches->batches[m];
         
         printf("%02d-> %02d img=%d call=%d\n", j, m, batch->image, batch->numCalls);
     }
@@ -1581,7 +1570,7 @@ static void glnvg__renderBatch(GLNVGcontext* gl, GLNVGrenderBatchPool* batches)
 static void glnvg__renderFlushBatched(GLNVGcontext* gl)
 {
     glnvg__renderBegin(gl);
-
+    
     GLNVGrenderNodePool pool;
     pool.numNodes = 0;
     
@@ -1700,7 +1689,7 @@ static void glnvg__renderFlush(void* uptr)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
     
-#if SORT
+#if BATCH_RENDER_CALLS
     glnvg__renderFlushBatched(gl);
 #else
 	float xform[9];
@@ -1828,8 +1817,8 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
-#if SORT
-    glnvg_worldBounds(bounds, xform, scissor, call->bounds);
+#if BATCH_RENDER_CALLS
+    glnvg_worldBounds(bounds, xform, scissor, gl->view, call->bounds);
 #endif
 
 	if (npaths == 1 && paths[0].convex)
@@ -1912,8 +1901,8 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
-#if SORT
-    glnvg_worldBounds(bounds, xform, scissor, call->bounds);
+#if BATCH_RENDER_CALLS
+    glnvg_worldBounds(bounds, xform, scissor, gl->view, call->bounds);
 #endif
     
 	// Allocate vertices for all the paths.
@@ -1969,8 +1958,8 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scis
 	call->image = paint->image;
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
-#if SORT
-    glnvg_worldBounds(bounds, xform, scissor, call->bounds);
+#if BATCH_RENDER_CALLS
+    glnvg_worldBounds(bounds, xform, scissor, gl->view, call->bounds);
 #endif
     
 	// Allocate vertices for all the paths.

@@ -429,34 +429,55 @@ void nvgCancelFrame(NVGcontext* ctx)
 	ctx->params.renderCancel(ctx->params.userPtr);
 }
 
+static int nvg__cleanupFontCache(NVGcontext* ctx, int clean)
+{
+    int r = 0;
+    if (ctx->fontImageIdx != 0)
+    {
+        int fontImage = ctx->fontImages[ctx->fontImageIdx];
+        int i, j, iw, ih;
+        // check if images that smaller than current one need to be deleted
+        if (fontImage != 0)
+        {
+            nvgImageSize(ctx, fontImage, &iw, &ih);
+            for (i = j = 0; i < ctx->fontImageIdx; i++)
+            {
+                if (ctx->fontImages[i] != 0)
+                {
+                    int nw, nh;
+                    nvgImageSize(ctx, ctx->fontImages[i], &nw, &nh);
+                    if (nw < iw || nh < ih)
+                    {
+                        ++r;
+                        if (clean > 0) // delete images that smaller than current one
+                            nvgDeleteImage(ctx, ctx->fontImages[i]);
+                    }
+                    else if (clean > 0)
+                    {
+                        ctx->fontImages[j++] = ctx->fontImages[i];
+                    }
+                }
+            }
+            
+            if (clean > 0)
+            {
+                // make current font image to first
+                ctx->fontImages[j++] = ctx->fontImages[0];
+                ctx->fontImages[0] = fontImage;
+                ctx->fontImageIdx = 0;
+                // clear all images after j
+                for (i = j; i < NVG_MAX_FONTIMAGES; i++)
+                    ctx->fontImages[i] = 0;
+            }
+        }
+    }
+    return r;
+}
+
 void nvgEndFrame(NVGcontext* ctx)
 {
 	ctx->params.renderFlush(ctx->params.userPtr);
-	if (ctx->fontImageIdx != 0) {
-		int fontImage = ctx->fontImages[ctx->fontImageIdx];
-		int i, j, iw, ih;
-		// delete images that smaller than current one
-		if (fontImage == 0)
-			return;
-		nvgImageSize(ctx, fontImage, &iw, &ih);
-		for (i = j = 0; i < ctx->fontImageIdx; i++) {
-			if (ctx->fontImages[i] != 0) {
-				int nw, nh;
-				nvgImageSize(ctx, ctx->fontImages[i], &nw, &nh);
-				if (nw < iw || nh < ih)
-					nvgDeleteImage(ctx, ctx->fontImages[i]);
-				else
-					ctx->fontImages[j++] = ctx->fontImages[i];
-			}
-		}
-		// make current font image to first
-		ctx->fontImages[j++] = ctx->fontImages[0];
-		ctx->fontImages[0] = fontImage;
-		ctx->fontImageIdx = 0;
-		// clear all images after j
-		for (i = j; i < NVG_MAX_FONTIMAGES; i++)
-			ctx->fontImages[i] = 0;
-	}
+    nvg__cleanupFontCache(ctx, 1);
 }
 
 static NVGvertex* nvg__allocDrawListVertices(NVGdisplayList* ctx, int n)
@@ -822,26 +843,7 @@ void nvgDrawDisplayList(NVGcontext* ctx, NVGdisplayList* list)
 
 int nvgFindOutdatedDisplayListResources(NVGcontext * ctx)
 {
-	int r = 0;
-	if (ctx->fontImageIdx != 0) {
-		int fontImage = ctx->fontImages[ctx->fontImageIdx];
-		int i, iw, ih;
-		// check if images that smaller than current one are going to be deleted
-		if (fontImage != 0)
-		{
-			nvgImageSize(ctx, fontImage, &iw, &ih);
-			for (i = 0; i < ctx->fontImageIdx; i++)
-			{
-				if (ctx->fontImages[i] != 0)
-				{
-					int nw, nh;
-					nvgImageSize(ctx, ctx->fontImages[i], &nw, &nh);
-					if (nw < iw || nh < ih) ++r;
-				}
-			}
-		}
-	}
-	return r;
+    return nvg__cleanupFontCache(ctx, 0);
 }
 
 NVGcolor nvgRGB(unsigned char r, unsigned char g, unsigned char b)
