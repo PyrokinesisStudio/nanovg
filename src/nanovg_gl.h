@@ -1468,14 +1468,38 @@ void glnvg_intersectNodeInvalidateHiddenRecursive(GLNVGrenderNode * node, const 
     
     if ( i != 0 )
     {
-        if (node->isNode != 0)
+       
+//#define TRY_SHRINK 1
+#if TRY_SHRINK //shrink the boundary, if it fully overlaps an axis
+        float * bounds = node->bounds;
+       
+        int v = b[0] <= bounds[0] && b[2] >= bounds[2];
+        int h = b[1] <= bounds[1] && b[3] >= bounds[3];
+        
+        if (v) // fully overlaps in x axis
+        {
+            if (b[3] > bounds[3]) bounds[3] = glnvg__maxf(b[1], bounds[1]);
+            else if (b[1] < bounds[1]) bounds[1] = glnvg__minf(b[3], bounds[3]);
+        }
+         
+        if (h) // fully overlaps in y axis
+        {
+            if (b[2] > bounds[2]) bounds[2] = glnvg__maxf(b[0], bounds[0]);
+            else if (b[0] < bounds[0]) bounds[0] = glnvg__minf(b[2], bounds[2]);
+        }
+#endif
+        if (i->isNode != 0)
         {
             glnvg_intersectNodeInvalidateHiddenRecursive(node->left, b, res);
             glnvg_intersectNodeInvalidateHiddenRecursive(node->right, b, res);
         }
         else
         {
+#if TRY_SHRINK
+            if ( v && h )
+#else
             if ( glnvg_containsBounds(b, node->bounds) )
+#endif
             {
                 node->call->type = GLNVG_NONE;
             }
@@ -1499,7 +1523,7 @@ int glnvg_intersectsBatchInvalidateHidden(const GLNVGrenderBatch * b, const floa
     if (opacity >= 1.0f)
         glnvg_intersectNodeInvalidateHiddenRecursive(b->root, bounds, &res);
     else
-        glnvg_intersectsBatchNoInvalidate(b, bounds);
+        res = glnvg_intersectsBatchNoInvalidate(b, bounds);
   
     return res;
 }
