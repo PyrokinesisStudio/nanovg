@@ -173,6 +173,7 @@ struct GLNVGcall {
 	int uniformOffset;
 	float xform[6];
     float bounds[4];
+    float opacity;
 };
 typedef struct GLNVGcall GLNVGcall;
 
@@ -1252,7 +1253,10 @@ static void glnvg__renderEnd(GLNVGcontext* gl)
 }
 
 
-#define BATCH_RENDER_CALLS 1
+//#define BATCH_RENDER_CALLS 1
+//#define BATCH_RENDER_HIDE_HIDDEN 1    // this will remove calls that are hidden by other calls
+                                        // Note: only axis aligned bounding boxes are checked
+                                        // so this will only work when drawing mostly rectangular shaped (e.g. UIs)
 #if BATCH_RENDER_CALLS
 
 typedef GLNVGcall GLNVGbatchedCall;
@@ -1260,8 +1264,19 @@ typedef GLNVGcall GLNVGbatchedCall;
 struct GLNVGrenderNode
 {
     float bounds[4]; //TODO: SIMD for bounds checks or integer bounds?
-    struct GLNVGrenderNode *left;
-    struct GLNVGrenderNode *right;
+    
+    union
+    {
+        struct {
+            struct GLNVGrenderNode *left;
+            struct GLNVGrenderNode *right;
+        }; //bvh node
+        
+        struct {
+            void *isNode; //if 0 the node is a leaf and 'call' is valid
+            GLNVGcall *call;
+        }; //bvh leaf (use the unused memory to store pointer to call)
+    };
 };
 typedef struct GLNVGrenderNode GLNVGrenderNode;
 
@@ -1416,6 +1431,11 @@ static int glnvg_intersectBounds(const float* b, const float* a)
     return (b[0] <= a[2] && b[2] >= a[0]) && (b[1] <= a[3] && b[3] >= a[1]);
 }
 
+static int glnvg_containsBounds(const float* b, const float* a)
+{
+    return (a[0] >= b[0] && a[1] >= b[1]) && (a[2] <= b[2] && a[3] <= b[3]);
+}
+
 GLNVGrenderNode * glnvg_intersectNode(GLNVGrenderNode * batch, const float* b)
 {
     return (batch != 0 && glnvg_intersectBounds(batch->bounds, b) != 0) ? batch : 0;
@@ -1425,7 +1445,7 @@ GLNVGrenderNode * glnvg_intersectNodeRecursive(GLNVGrenderNode * batch, const fl
 {
     GLNVGrenderNode * i = glnvg_intersectNode(batch, b);
     
-    if ( i != 0 && batch->left ) // || batch->right) )
+    if ( i != 0 && batch->isNode != 0 )
     {
         i = glnvg_intersectNodeRecursive(batch->left, b);
         
@@ -1441,6 +1461,49 @@ GLNVGrenderNode * glnvg_intersectsBatch(const GLNVGrenderBatch * b, const float 
     return glnvg_intersectNodeRecursive(b->root, bounds);
 }
 
+
+void glnvg_intersectNodeInvalidateHiddenRecursive(GLNVGrenderNode * node, const float* b, int * res)
+{
+    GLNVGrenderNode * i = glnvg_intersectNode(node, b);
+    
+    if ( i != 0 )
+    {
+        if (node->isNode != 0)
+        {
+            glnvg_intersectNodeInvalidateHiddenRecursive(node->left, b, res);
+            glnvg_intersectNodeInvalidateHiddenRecursive(node->right, b, res);
+        }
+        else
+        {
+            if ( glnvg_containsBounds(b, node->bounds) )
+            {
+                node->call->type = GLNVG_NONE;
+            }
+            
+            *res = *res + 1;
+        }
+    }
+}
+
+int glnvg_intersectsBatchNoInvalidate(const GLNVGrenderBatch * b, const float * bounds)
+{
+    GLNVGrenderNode * n = glnvg_intersectNodeRecursive(b->root, bounds);
+    if (n && n->isNode == 0) return 1;
+    return 0;
+}
+
+int glnvg_intersectsBatchInvalidateHidden(const GLNVGrenderBatch * b, const float * bounds, float opacity)
+{
+    int res = 0;
+    
+    if (opacity >= 1.0f)
+        glnvg_intersectNodeInvalidateHiddenRecursive(b->root, bounds, &res);
+    else
+        glnvg_intersectsBatchNoInvalidate(b, bounds);
+  
+    return res;
+}
+
 void glnvg_combineBounds(const float*a, const float *b, float * result)
 {
     result[0] = glnvg__minf(a[0], b[0]);
@@ -1453,7 +1516,7 @@ GLNVGrenderNode * glnvg_expandNodeRecursive(GLNVGrenderNode * batch, const float
 {
     GLNVGrenderNode * i = glnvg_intersectNode(batch, b);
     
-    if ( i != 0 && batch->left ) // || batch->right))
+    if ( i != 0 && batch->isNode != 0 )
     {
         glnvg_combineBounds(b, i->bounds, i->bounds); //not for leaf nodes!
         
@@ -1481,6 +1544,9 @@ GLNVGrenderNode * glnvg_appendNode(GLNVGrenderBatch * b, GLNVGrenderNodePool *po
             {
                 glnvg_combineBounds(bounds, intersecting_node->bounds, intersecting_node->bounds);
                 
+                if (intersecting_node->isNode == 0)
+                    move_intersecting->call = intersecting_node->call;
+                
                 intersecting_node->left = node;
                 intersecting_node->right = move_intersecting;
             }
@@ -1506,22 +1572,26 @@ GLNVGrenderNode * glnvg_appendNode(GLNVGrenderBatch * b, GLNVGrenderNodePool *po
 
 GLNVGrenderNode * glnvg_addCall(GLNVGrenderBatch * b, GLNVGrenderNodePool *pool, GLNVGbatchedCall* call)
 {
+    GLNVGrenderNode * n = 0;
+    
     if (b->numCalls < GLNVG_MAX_NUMBER_CALLS)
     {
         b->calls[ b->numCalls++ ] = call;
         
         if (b->numCalls == 1)
         {
-            b->root = glnvg_nodeInit(pool, call->bounds);
-            return b->root;
+            n = glnvg_nodeInit(pool, call->bounds);
+            b->root = n;
         }
         else
         {
-            return glnvg_appendNode(b, pool, call->bounds);
+            n = glnvg_appendNode(b, pool, call->bounds);
         }
+        
+        n->call = call;
     }
     
-    return 0;
+    return n;
 }
 
 //override-able
@@ -1559,7 +1629,10 @@ static void glnvg__renderBatch(GLNVGcontext* gl, GLNVGrenderBatchPool* batches)
             
             for (i =0; i<batch->numCalls; ++i)
             {
-                glnvg__renderCall(gl, batch->calls[i], xform);
+                GLNVGcall * call = batch->calls[i];
+                
+                if (call->opacity >= 0.0f)
+                    glnvg__renderCall(gl, call, xform);
             }
         }
     }
@@ -1593,9 +1666,17 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
                 int m = batches.map[j-1];
                 GLNVGrenderBatch * batch = &batches.batches[m];
                 
+#if BATCH_RENDER_HIDE_HIDDEN
+                int res = glnvg_intersectsBatchInvalidateHidden(batch, call->bounds, call->opacity);
+#else
+                int res = glnvg_intersectsBatchNoInvalidate(batch, call->bounds);
+#endif
+                
                 if (glnvg_shouldAddCallToBatch(call, batch) != 0)
                 {
-                    // if first found batch - see if there are potentially others
+                    int others = -1;
+                    
+                    // if first found batch - see if there are potentially other batches to add this call
                     if (found == 0)
                     {
                         if (batch->numCalls < GLNVG_MAX_NUMBER_CALLS)
@@ -1603,7 +1684,7 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
                         else
                             insert = j;
                         
-                        int others = 0;
+                        others = 0;
                         
                         for (int k = j-1; k > 0; --k)
                         {
@@ -1617,9 +1698,6 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
                                 break;
                             }
                         }
-                        
-                        if (others == 0)
-                            break;
                     }
                     else
                     {
@@ -1627,28 +1705,41 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
                             found = batch;
                     }
                     
-                    //if we already intesect with this batch break!
-                    if (glnvg_intersectsBatch(batch, call->bounds) != 0)
-                        break;
+                    //if we already intesect with this batch or there are no similar batches break!
+                    if (res != 0 || others == 0)
+                    {
+                       break;
+                    }
                 }
                 else
                 {
-                    GLNVGrenderNode * node = glnvg_intersectsBatch(batch, call->bounds);
-                    
                     //check if intersects with nodes (only leafs)
-                    if (node != 0 && node->left == 0)// && node->right == 0)
+                    if (res != 0)
                     {
-                        //yes: break and add new batch
+                        //yes: break and add new batch here
                         insert = j;
                         break;
                     }
                     else
                     {
-                        //no: continue and see if we can add to existing batch to come.
+                        //no: continue and see if we can add to existing batch to come
                         insert = j + 1;
                     }
                 }
             }
+ 
+#if BATCH_RENDER_HIDE_HIDDEN
+            // hide hidden calls of remaining batches
+            if (call->opacity >= 1.0f)
+            {
+                for (int k = j-1; k > 0; --k)
+                {
+                    int m = batches.map[k-1];
+                    GLNVGrenderBatch * batch = &batches.batches[m];
+                    glnvg_intersectsBatchInvalidateHidden(batch, call->bounds, call->opacity);
+                }
+            }
+#endif
             
             GLNVGrenderNode * added = 0;
             
@@ -1702,9 +1793,8 @@ static void glnvg__renderFlush(void* uptr)
     glnvg__renderBegin(gl);
     
     if (gl->ncalls > 0) {
-        
         for (i = 0; i < gl->ncalls; i++) {
-            glnvg__renderCall(gl,  &gl->calls[i], xform);
+            glnvg__renderCall(gl, &gl->calls[i], xform);
         }
     }
     
@@ -1819,6 +1909,7 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 	memcpy(call->xform, xform, sizeof(float) * 6);
 #if BATCH_RENDER_CALLS
     glnvg_worldBounds(bounds, xform, scissor, gl->view, call->bounds);
+    call->opacity = glnvg__maxf(paint->innerColor.a, paint->outerColor.a);
 #endif
 
 	if (npaths == 1 && paths[0].convex)
@@ -1903,6 +1994,7 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor
 	memcpy(call->xform, xform, sizeof(float) * 6);
 #if BATCH_RENDER_CALLS
     glnvg_worldBounds(bounds, xform, scissor, gl->view, call->bounds);
+    call->opacity = glnvg__maxf(paint->innerColor.a, paint->outerColor.a);
 #endif
     
 	// Allocate vertices for all the paths.
@@ -1960,6 +2052,7 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scis
 	memcpy(call->xform, xform, sizeof(float) * 6);
 #if BATCH_RENDER_CALLS
     glnvg_worldBounds(bounds, xform, scissor, gl->view, call->bounds);
+    call->opacity = glnvg__maxf(paint->innerColor.a, paint->outerColor.a);
 #endif
     
 	// Allocate vertices for all the paths.
