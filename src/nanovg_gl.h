@@ -1262,12 +1262,45 @@ static void glnvg__renderEnd(GLNVGcontext* gl)
 // "similar" (see glnvg_shouldAddCallToBatch for definition of similar) draw calls as possible
 // by checking if bounding boxes of primitives are overlapping or not.
 
+static float glnvg__minf(float a, float b) { return a < b ? a : b; }
+static float glnvg__maxf(float a, float b) { return a > b ? a : b; }
+
+static void glnvg__transformBounds(const float *bounds, const float* t, float * result)
+{
+    float x, y;
+    const float verts[] =
+    {
+        bounds[0], bounds[1],
+        bounds[0], bounds[3],
+        bounds[2], bounds[1],
+        bounds[2], bounds[3]
+    };
+    
+    result[0] = result[1] = 1e6f;
+    result[2] = result[3] = -1e6f;
+    
+    for (int i=0; i<8; i+=2)
+    {
+        x = verts[i]*t[0] + verts[i+1]*t[2] + t[4];
+        y = verts[i]*t[1] + verts[i+1]*t[3] + t[5];
+        
+        result[0] = glnvg__minf(result[0], x);
+        result[1] = glnvg__minf(result[1], y);
+        result[2] = glnvg__maxf(result[2], x);
+        result[3] = glnvg__maxf(result[3], y);
+    }
+}
+
+
 //#define BATCH_RENDER_CALLS 1
 //#define BATCH_RENDER_HIDE_HIDDEN 1    // this will remove calls that are hidden by other calls
                                         // Note: only axis aligned bounding boxes are checked
                                         // so this will only work when drawing mostly solid rectangular shapes (e.g. UIs)
 
 #if BATCH_RENDER_CALLS
+
+static float glnvg__absf(float a) { return a >= 0.0f ? a : -a; }
+static float glnvg__clampf(float a, float mn, float mx) { return a < mn ? mn : (a > mx ? mx : a); }
 
 typedef GLNVGcall GLNVGbatchedCall;
 
@@ -1289,11 +1322,6 @@ struct GLNVGrenderNode
     };
 };
 typedef struct GLNVGrenderNode GLNVGrenderNode;
-
-static float glnvg__minf(float a, float b) { return a < b ? a : b; }
-static float glnvg__maxf(float a, float b) { return a > b ? a : b; }
-static float glnvg__absf(float a) { return a >= 0.0f ? a : -a; }
-static float glnvg__clampf(float a, float mn, float mx) { return a < mn ? mn : (a > mx ? mx : a); }
 
 static void glnvg__scissorRect(const NVGscissor * scissor, const float * tx, float * rect )
 {
@@ -1323,28 +1351,7 @@ static void glnvg__scissorRect(const NVGscissor * scissor, const float * tx, flo
 
 void glnvg_worldBounds(const float *bounds, const float* t, const NVGscissor * scissor, const float * screen, float * result)
 {
-    float x, y;
-    const float verts[] =
-    {
-        bounds[0], bounds[1],
-        bounds[0], bounds[3],
-        bounds[2], bounds[1],
-        bounds[2], bounds[3]
-    };
-    
-    result[0] = result[1] = 1e6f;
-    result[2] = result[3] = -1e6f;
-    
-    for (int i=0; i<8; i+=2)
-    {
-        x = verts[i]*t[0] + verts[i+1]*t[2] + t[4];
-        y = verts[i]*t[1] + verts[i+1]*t[3] + t[5];
-    
-        result[0] = glnvg__minf(result[0], x);
-        result[1] = glnvg__minf(result[1], y);
-        result[2] = glnvg__maxf(result[2], x);
-        result[3] = glnvg__maxf(result[3], y);
-    }
+    glnvg__transformBounds(bounds, t, result);
     
     float clip[4] = { 0.0f, 0.0f, screen[0], screen[1] };
     
@@ -2006,13 +2013,8 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
     const float * b = bounds;
     
 #if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
-    const float txBounds[4] =
-    {
-        bounds[0]*xform[0] + bounds[1]*xform[2] + xform[4],
-        bounds[0]*xform[1] + bounds[1]*xform[3] + xform[5],
-        bounds[2]*xform[0] + bounds[3]*xform[2] + xform[4],
-        bounds[2]*xform[1] + bounds[3]*xform[3] + xform[5]
-    };
+    float txBounds[4];
+    glnvg__transformBounds(bounds, xform, txBounds);
     b = txBounds;
 #endif
     
