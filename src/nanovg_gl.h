@@ -50,6 +50,12 @@ enum NVGcreateFlags {
 #endif
 
 #define NANOVG_GL_USE_STATE_FILTER (1)
+    
+// NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER is 1 vertices will be transformed in vertex shader,
+// i.e. vertex shader constants will change for every primitive. If 0 vertices
+// are transformed on CPU and vertex shader constants are only set once.
+// Note: only works if NVG_TRANSFORM_IN_BACKEND is used.
+#define NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER 1
 
 // Creates NanoVG contexts for different OpenGL (ES) versions.
 // Flags should be combination of the create flags above.
@@ -547,7 +553,7 @@ static int glnvg__renderCreate(void* uptr)
 		"#endif\n"
 		"void main(void) {\n"
 		"	ftcoord = tcoord;\n"
-#if NVG_TRANSFORM_IN_VERTEX_SHADER
+#if NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER
 		"   vec3 v = vec3(vertex, 1.0);\n"
 		"	vec2 pt = vec2(dot(v,xform[0]), dot(v,xform[1]));\n"
 #else 
@@ -913,7 +919,7 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGfragUniforms* frag, NVGpai
 	GLNVGtexture* tex = NULL;
 	float invxform[6];
 
-#if NVG_TRANSFORM_IN_VERTEX_SHADER
+#if NVG_TRANSFORM_IN_BACKEND
 	float t[6];
 #else
 	const float * t = scissor->xform;
@@ -931,7 +937,7 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGfragUniforms* frag, NVGpai
 		frag->scissorScale[0] = 1.0f;
 		frag->scissorScale[1] = 1.0f;
 	} else {
-#if NVG_TRANSFORM_IN_VERTEX_SHADER
+#if NVG_TRANSFORM_IN_BACKEND
 		memcpy(t, scissor->xform, sizeof(float)*6);
 		nvgTransformMultiply(t, xform);
 #endif
@@ -947,7 +953,7 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGfragUniforms* frag, NVGpai
 	frag->strokeMult = (width*0.5f + fringe*0.5f) / fringe;
 	frag->strokeThr = strokeThr;
 
-#if NVG_TRANSFORM_IN_VERTEX_SHADER
+#if NVG_TRANSFORM_IN_BACKEND
 	memcpy(t, paint->xform, sizeof(float)*6);
 	nvgTransformMultiply(t, xform);
 #else
@@ -1206,7 +1212,7 @@ static void glnvg__renderBegin(GLNVGcontext* gl)
         glBindBuffer(GL_UNIFORM_BUFFER, gl->fragBuf);
 #endif
         
-#if !NVG_TRANSFORM_IN_VERTEX_SHADER //just set once
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER //just set once
         glUniform3fv(gl->shader.loc[GLNVG_LOC_XFORM], 3, xform);
 #endif
     }
@@ -1214,7 +1220,7 @@ static void glnvg__renderBegin(GLNVGcontext* gl)
 
 static void glnvg__renderCall(GLNVGcontext * gl, GLNVGcall * call, float * xform)
 {
-#if NVG_TRANSFORM_IN_VERTEX_SHADER
+#if NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER
     //transpose for matrix form
     xform[0] = call->xform[0]; xform[1] = call->xform[2]; xform[2] = call->xform[4];
     xform[3] = call->xform[1]; xform[4] = call->xform[3]; xform[5] = call->xform[5];
@@ -1252,11 +1258,15 @@ static void glnvg__renderEnd(GLNVGcontext* gl)
     gl->nuniforms = 0;
 }
 
+// Experimental feature: will create a 2D bounding volume hierarchy and try to batch as many
+// "similar" (see glnvg_shouldAddCallToBatch for definition of similar) draw calls as possible
+// by checking if bounding boxes of primitives are overlapping or not.
 
 //#define BATCH_RENDER_CALLS 1
 //#define BATCH_RENDER_HIDE_HIDDEN 1    // this will remove calls that are hidden by other calls
                                         // Note: only axis aligned bounding boxes are checked
-                                        // so this will only work when drawing mostly rectangular shaped (e.g. UIs)
+                                        // so this will only work when drawing mostly solid rectangular shapes (e.g. UIs)
+
 #if BATCH_RENDER_CALLS
 
 typedef GLNVGcall GLNVGbatchedCall;
@@ -1884,6 +1894,25 @@ static int glnvg__allocVerts(GLNVGcontext* gl, int n)
 	return ret;
 }
 
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
+static void glnvg__transformVerts(const NVGvertex* input, int n, const float* t, NVGvertex* result)
+{
+    int i;
+    const NVGvertex* vtx;
+    
+    //?? #pragma clang loop vectorize(enable) interleave(enable)
+    for (i=0; i<n; ++i)
+    {
+        vtx = input+i;
+        
+        result[i].x = vtx->x*t[0] + vtx->y*t[2] + t[4];
+        result[i].y = vtx->x*t[1] + vtx->y*t[3] + t[5];
+        result[i].u = vtx->u;
+        result[i].v = vtx->v;
+    }
+}
+#endif
+
 static int glnvg__allocFragUniforms(GLNVGcontext* gl, int n)
 {
 	int ret = 0, structSize = gl->fragSize;
@@ -1951,13 +1980,21 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 		if (path->nfill > 0) {
 			copy->fillOffset = offset;
 			copy->fillCount = path->nfill;
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
+            glnvg__transformVerts(path->fill, path->nfill, xform, &gl->verts[offset]);
+#else
 			memcpy(&gl->verts[offset], path->fill, sizeof(NVGvertex) * path->nfill);
+#endif
 			offset += path->nfill;
 		}
 		if (path->nstroke > 0) {
 			copy->strokeOffset = offset;
 			copy->strokeCount = path->nstroke;
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
+            glnvg__transformVerts(path->stroke, path->nstroke, xform, &gl->verts[offset]);
+#else
 			memcpy(&gl->verts[offset], path->stroke, sizeof(NVGvertex) * path->nstroke);
+#endif
 			offset += path->nstroke;
 		}
 	}
@@ -1966,13 +2003,26 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 	call->triangleOffset = offset;
 	call->triangleCount = 6;
 	quad = &gl->verts[call->triangleOffset];
-	glnvg__vset(&quad[0], bounds[0], bounds[3], 0.5f, 1.0f);
-	glnvg__vset(&quad[1], bounds[2], bounds[3], 0.5f, 1.0f);
-	glnvg__vset(&quad[2], bounds[2], bounds[1], 0.5f, 1.0f);
-
-	glnvg__vset(&quad[3], bounds[0], bounds[3], 0.5f, 1.0f);
-	glnvg__vset(&quad[4], bounds[2], bounds[1], 0.5f, 1.0f);
-	glnvg__vset(&quad[5], bounds[0], bounds[1], 0.5f, 1.0f);
+    const float * b = bounds;
+    
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
+    const float txBounds[4] =
+    {
+        bounds[0]*xform[0] + bounds[1]*xform[2] + xform[4],
+        bounds[0]*xform[1] + bounds[1]*xform[3] + xform[5],
+        bounds[2]*xform[0] + bounds[3]*xform[2] + xform[4],
+        bounds[2]*xform[1] + bounds[3]*xform[3] + xform[5]
+    };
+    b = txBounds;
+#endif
+    
+    glnvg__vset(&quad[0], b[0], b[3], 0.5f, 1.0f);
+    glnvg__vset(&quad[1], b[2], b[3], 0.5f, 1.0f);
+    glnvg__vset(&quad[2], b[2], b[1], 0.5f, 1.0f);
+    
+    glnvg__vset(&quad[3], b[0], b[3], 0.5f, 1.0f);
+    glnvg__vset(&quad[4], b[2], b[1], 0.5f, 1.0f);
+    glnvg__vset(&quad[5], b[0], b[1], 0.5f, 1.0f);
 
 	// Setup uniforms for draw calls
 	if (call->type == GLNVG_FILL) {
@@ -2033,7 +2083,11 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor
 		if (path->nstroke) {
 			copy->strokeOffset = offset;
 			copy->strokeCount = path->nstroke;
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
+            glnvg__transformVerts(path->stroke, path->nstroke, xform, &gl->verts[offset]);
+#else
 			memcpy(&gl->verts[offset], path->stroke, sizeof(NVGvertex) * path->nstroke);
+#endif
 			offset += path->nstroke;
 		}
 	}
@@ -2084,7 +2138,11 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scis
 	if (call->triangleOffset == -1) goto error;
 	call->triangleCount = nverts;
 
+#if !NANOVG_GL_TRANSFORM_IN_VERTEX_SHADER && NVG_TRANSFORM_IN_BACKEND
+    glnvg__transformVerts(verts, nverts, xform, &gl->verts[call->triangleOffset]);
+#else
 	memcpy(&gl->verts[call->triangleOffset], verts, sizeof(NVGvertex) * nverts);
+#endif
 
 	// Fill shader
 	call->uniformOffset = glnvg__allocFragUniforms(gl, 1);

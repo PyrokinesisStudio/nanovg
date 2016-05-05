@@ -32,8 +32,8 @@ extern "C" {
 
 typedef struct NVGcontext NVGcontext;
 
-// Perform vertex transformation in shader. Allows applying transformations to display lists.
-#define NVG_TRANSFORM_IN_VERTEX_SHADER 1
+// Perform vertex transformation in backend. Allows applying transformations to display lists.
+#define NVG_TRANSFORM_IN_BACKEND 1
 
 typedef struct NVGdisplayList NVGdisplayList;
 
