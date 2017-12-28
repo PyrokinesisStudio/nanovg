@@ -6,7 +6,7 @@
 #ifndef NANOVG_BGFX_H_HEADER_GUARD
 #define NANOVG_BGFX_H_HEADER_GUARD
 
-#include <bgfx/bgfx.h>
+#include "bgfx/bgfx.h"
 
 namespace bx { struct AllocatorI; }
 

@@ -161,6 +161,15 @@ struct GLNVGtexture {
 };
 typedef struct GLNVGtexture GLNVGtexture;
 
+struct GLNVGblend
+{
+	GLenum srcRGB;
+	GLenum dstRGB;
+	GLenum srcAlpha;
+	GLenum dstAlpha;
+};
+typedef struct GLNVGblend GLNVGblend;
+
 enum GLNVGcallType {
 	GLNVG_NONE = 0,
 	GLNVG_FILL,
@@ -180,6 +189,7 @@ struct GLNVGcall {
 	float xform[6];
     float bounds[4];
     float opacity;
+	GLNVGblend blendFunc;
 };
 typedef struct GLNVGcall GLNVGcall;
 
@@ -1161,46 +1171,52 @@ static void glnvg__renderCancel(void* uptr) {
 	gl->nuniforms = 0;
 }
 
+
 static GLenum glnvg_convertBlendFuncFactor(int factor)
 {
-	if (factor == NVG_ZERO)
+	if(factor == NVG_ZERO)
 		return GL_ZERO;
-	if (factor == NVG_ONE)
+	if(factor == NVG_ONE)
 		return GL_ONE;
-	if (factor == NVG_SRC_COLOR)
+	if(factor == NVG_SRC_COLOR)
 		return GL_SRC_COLOR;
-	if (factor == NVG_ONE_MINUS_SRC_COLOR)
+	if(factor == NVG_ONE_MINUS_SRC_COLOR)
 		return GL_ONE_MINUS_SRC_COLOR;
-	if (factor == NVG_DST_COLOR)
+	if(factor == NVG_DST_COLOR)
 		return GL_DST_COLOR;
-	if (factor == NVG_ONE_MINUS_DST_COLOR)
+	if(factor == NVG_ONE_MINUS_DST_COLOR)
 		return GL_ONE_MINUS_DST_COLOR;
-	if (factor == NVG_SRC_ALPHA)
+	if(factor == NVG_SRC_ALPHA)
 		return GL_SRC_ALPHA;
-	if (factor == NVG_ONE_MINUS_SRC_ALPHA)
+	if(factor == NVG_ONE_MINUS_SRC_ALPHA)
 		return GL_ONE_MINUS_SRC_ALPHA;
-	if (factor == NVG_DST_ALPHA)
+	if(factor == NVG_DST_ALPHA)
 		return GL_DST_ALPHA;
-	if (factor == NVG_ONE_MINUS_DST_ALPHA)
+	if(factor == NVG_ONE_MINUS_DST_ALPHA)
 		return GL_ONE_MINUS_DST_ALPHA;
-	if (factor == NVG_SRC_ALPHA_SATURATE)
+	if(factor == NVG_SRC_ALPHA_SATURATE)
 		return GL_SRC_ALPHA_SATURATE;
 	return GL_INVALID_ENUM;
 }
 
-static void glnvg__blendCompositeOperation(NVGcompositeOperationState op)
+static GLNVGblend glnvg__blendCompositeOperation(NVGcompositeOperationState op)
 {
-	GLenum srcRGB = glnvg_convertBlendFuncFactor(op.srcRGB);
-	GLenum dstRGB = glnvg_convertBlendFuncFactor(op.dstRGB);
-	GLenum srcAlpha = glnvg_convertBlendFuncFactor(op.srcAlpha);
-	GLenum dstAlpha = glnvg_convertBlendFuncFactor(op.dstAlpha);
-	if (srcRGB == GL_INVALID_ENUM || dstRGB == GL_INVALID_ENUM || srcAlpha == GL_INVALID_ENUM || dstAlpha == GL_INVALID_ENUM)
-		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-	else
-		glBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
+	GLNVGblend blend;
+	blend.srcRGB = glnvg_convertBlendFuncFactor(op.srcRGB);
+	blend.dstRGB = glnvg_convertBlendFuncFactor(op.dstRGB);
+	blend.srcAlpha = glnvg_convertBlendFuncFactor(op.srcAlpha);
+	blend.dstAlpha = glnvg_convertBlendFuncFactor(op.dstAlpha);
+	if(blend.srcRGB == GL_INVALID_ENUM || blend.dstRGB == GL_INVALID_ENUM || blend.srcAlpha == GL_INVALID_ENUM || blend.dstAlpha == GL_INVALID_ENUM)
+	{
+		blend.srcRGB = GL_ONE;
+		blend.dstRGB = GL_ONE_MINUS_SRC_ALPHA;
+		blend.srcAlpha = GL_ONE;
+		blend.dstAlpha = GL_ONE_MINUS_SRC_ALPHA;
+	}
+	return blend;
 }
 
-static void glnvg__renderBegin(GLNVGcontext* gl, NVGcompositeOperationState compositeOperation)
+static void glnvg__renderBegin(GLNVGcontext* gl)
 {
     if (gl->ncalls > 0) {
         float xform[9];
@@ -1208,7 +1224,6 @@ static void glnvg__renderBegin(GLNVGcontext* gl, NVGcompositeOperationState comp
         // Setup require GL state.
         glUseProgram(gl->shader.prog);
         
-		glnvg__blendCompositeOperation(compositeOperation);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
@@ -1873,7 +1888,7 @@ static void glnvg__renderFlushBatched(GLNVGcontext* gl)
 #endif
 
 
-static void glnvg__renderFlush(void* uptr, NVGcompositeOperationState compositeOperation)
+static void glnvg__renderFlush(void* uptr)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
     
@@ -1887,7 +1902,7 @@ static void glnvg__renderFlush(void* uptr, NVGcompositeOperationState compositeO
     xform[7] = 2.0f/gl->view[1];
     xform[8] = 1.0f;
     
-    glnvg__renderBegin(gl, compositeOperation);
+    glnvg__renderBegin(gl);
     
     if (gl->ncalls > 0) {
         for (i = 0; i < gl->ncalls; i++) {
@@ -2005,7 +2020,7 @@ static void glnvg__vset(NVGvertex* vtx, float x, float y, float u, float v)
 	vtx->v = v;
 }
 
-static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform, float fringe,
+static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, const float* xform, float fringe,
 							  const float* bounds, const NVGpath* paths, int npaths)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
@@ -2021,6 +2036,7 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGscissor* scissor, 
 	if (call->pathOffset == -1) goto error;
 	call->pathCount = npaths;
 	call->image = paint->image;
+	call->blendFunc = glnvg__blendCompositeOperation(compositeOperation);
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
 #if BATCH_RENDER_CALLS
@@ -2108,7 +2124,7 @@ error:
 	if (gl->ncalls > 0) gl->ncalls--;
 }
 
-static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform, float fringe,
+static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, const float* xform, float fringe,
 								float strokeWidth, const float* bounds, const NVGpath* paths, int npaths)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
@@ -2122,6 +2138,7 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGscissor* scissor
 	if (call->pathOffset == -1) goto error;
 	call->pathCount = npaths;
 	call->image = paint->image;
+	call->blendFunc = glnvg__blendCompositeOperation(compositeOperation);
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
 #if BATCH_RENDER_CALLS
@@ -2173,7 +2190,7 @@ error:
 	if (gl->ncalls > 0) gl->ncalls--;
 }
 
-static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scissor, const float* xform,
+static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, const float* xform,
 								   const float* bounds, const NVGvertex* verts, int nverts)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
@@ -2184,6 +2201,7 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGscissor* scis
 
 	call->type = GLNVG_TRIANGLES;
 	call->image = paint->image;
+	call->blendFunc = glnvg__blendCompositeOperation(compositeOperation);
 
 	memcpy(call->xform, xform, sizeof(float) * 6);
 #if BATCH_RENDER_CALLS

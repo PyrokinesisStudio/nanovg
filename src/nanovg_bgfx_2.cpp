@@ -24,15 +24,13 @@
 
 #include <stdlib.h>
 #include <math.h>
-#include <nanovg.h>
-#include <nanovg_bgfx.h>
+#include "nanovg.h"
 
 #include <bgfx/bgfx.h>
 #include <bgfx/embedded_shader.h>
 
 #include <bx/bx.h>
 #include <bx/allocator.h>
-#include <bx/file.h>
 #include <bx/uint32_t.h>
 
 BX_PRAGMA_DIAGNOSTIC_IGNORED_MSVC(4244); // warning C4244: '=' : conversion from '' to '', possible loss of data
@@ -758,17 +756,17 @@ namespace
 	{
 		struct GLNVGcontext* gl = (struct GLNVGcontext*)_userPtr;
 
-		uint32_t available = gl->nverts > 0 ? bgfx::getAvailTransientVertexBuffer(gl->nverts, s_nvgDecl) : 0;
-		
-		if(available < gl->nverts)
-		{
-			gl->nverts = available;
-			BX_WARN(true, "Vertex number truncated due to transient vertex buffer overflow");
-		}
-
-		if (gl->ncalls > 0 && gl->nverts > 0)
+		if (gl->ncalls > 0)
 		{
 			bgfx::allocTransientVertexBuffer(&gl->tvb, gl->nverts, s_nvgDecl);
+
+			int allocated = gl->tvb.size/gl->tvb.stride;
+
+			if (allocated < gl->nverts)
+			{
+				gl->nverts = allocated;
+				BX_WARN(true, "Vertex number truncated due to transient vertex buffer overflow");
+			}
 
 			bx::memCopy(gl->tvb.data, gl->verts, gl->nverts * sizeof(struct NVGvertex) );
 
@@ -890,8 +888,16 @@ namespace
 		vtx->v = v;
 	}
 
-	static void nvgRenderFill(void* _userPtr, struct NVGpaint* paint, NVGcompositeOperationState compositeOperation, struct NVGscissor* scissor, const float* xform, float fringe,
-							  const float* bounds, const struct NVGpath* paths, int npaths)
+	static void nvgRenderFill(
+		  void* _userPtr
+		, NVGpaint* paint
+		, NVGcompositeOperationState compositeOperation
+		, NVGscissor* scissor
+		, float fringe
+		, const float* bounds
+		, const NVGpath* paths
+		, int npaths
+		)
 	{
 		struct GLNVGcontext* gl = (struct GLNVGcontext*)_userPtr;
 
@@ -968,8 +974,16 @@ namespace
 		}
 	}
 
-	static void nvgRenderStroke(void* _userPtr, struct NVGpaint* paint, NVGcompositeOperationState compositeOperation, struct NVGscissor* scissor,
-								const float* xform,float fringe, float strokeWidth, const float* bounds, const struct NVGpath* paths, int npaths)
+	static void nvgRenderStroke(
+		  void* _userPtr
+		, struct NVGpaint* paint
+		, NVGcompositeOperationState compositeOperation
+		, struct NVGscissor* scissor
+		, float fringe
+		, float strokeWidth
+		, const struct NVGpath* paths
+		, int npaths
+		)
 	{
 		struct GLNVGcontext* gl = (struct GLNVGcontext*)_userPtr;
 
@@ -1006,8 +1020,7 @@ namespace
 	}
 
 	static void nvgRenderTriangles(void* _userPtr, struct NVGpaint* paint, NVGcompositeOperationState compositeOperation, struct NVGscissor* scissor,
-								   const float* xform, const float* bounds,
-								   const struct NVGvertex* verts, int nverts)
+									   const struct NVGvertex* verts, int nverts)
 	{
 		struct GLNVGcontext* gl = (struct GLNVGcontext*)_userPtr;
 		struct GLNVGcall* call = glnvg__allocCall(gl);
