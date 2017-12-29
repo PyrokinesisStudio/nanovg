@@ -553,7 +553,7 @@ static int nvg__cleanupFontCache(NVGcontext* ctx, int clean)
 void nvgEndFrame(NVGcontext* ctx)
 {
 	NVGstate* state = nvg__getState(ctx);
-	ctx->params.renderFlush(ctx->params.userPtr, state->compositeOperation);
+	ctx->params.renderFlush(ctx->params.userPtr); // , state->compositeOperation);
     nvg__cleanupFontCache(ctx, 1);
 }
 
